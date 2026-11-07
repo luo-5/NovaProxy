@@ -104,8 +104,10 @@ export function getProtocolBadge(protocol: string): {
   }
 }
 
-export function formatRelativeTime(timestampSec: number | null | undefined): string {
-  if (!timestampSec) return "Never";
+export function formatRelativeTime(
+  timestampSec: number | null | undefined
+): string {
+  if (!timestampSec || isNaN(timestampSec) || timestampSec <= 0) return "Never";
   const now = Math.floor(Date.now() / 1000);
   const diff = now - timestampSec;
   if (diff < 60) return "Just now";

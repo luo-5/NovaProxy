@@ -741,3 +741,29 @@ pub fn backup_database(state: State<'_, AppState>, target_path: String) -> Resul
         .backup_database(&target_path)
         .map_err(|e| e.to_string())
 }
+
+// ==================== Phase P7: Diagnostics & Reporting ====================
+
+#[tauri::command]
+pub fn export_diagnostics_report(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let mut settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+    if settings.clash_api_secret.is_some() {
+        settings.clash_api_secret = Some("***REDACTED***".to_string());
+    }
+
+    let report = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "os_platform": std::env::consts::OS,
+        "os_arch": std::env::consts::ARCH,
+        "core_status": state.core_manager.status(),
+        "sysproxy_status": SystemProxyManager::query_current().ok(),
+        "node_count": state.db.list_nodes().map(|v| v.len()).unwrap_or(0),
+        "subscription_count": state.db.list_subscriptions().map(|v| v.len()).unwrap_or(0),
+        "rule_count": state.db.list_routing_rules().map(|v| v.len()).unwrap_or(0),
+        "app_settings": settings,
+        "recent_logs": state.core_manager.logs(None, Some(50)),
+    });
+
+    Ok(report)
+}

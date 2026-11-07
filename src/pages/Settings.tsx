@@ -3,11 +3,14 @@ import { useTranslation } from "react-i18next";
 import {
   Cpu,
   Shield,
+  ShieldAlert,
   ExternalLink,
   Globe,
   Sun,
   Moon,
   Info,
+  Check,
+  Copy,
 } from "lucide-react";
 import { useAppStore } from "../stores/appStore";
 import {
@@ -18,6 +21,8 @@ import {
   setAutostartStatus,
   isProcessElevated,
   requestAdminRelaunch,
+  checkDatabaseIntegrity,
+  exportDiagnosticsReport,
   type AppSettings,
   type CoreType,
 } from "../lib/ipc";
@@ -324,7 +329,53 @@ export const Settings: React.FC = () => {
         </div>
       </div>
 
-      {/* 4. About & Version */}
+      {/* 4. Diagnostics & Disaster Recovery */}
+      <div className="bg-card border border-border rounded-2xl p-6 shadow-sm space-y-4">
+        <h3 className="font-semibold text-xs text-foreground uppercase tracking-wider flex items-center gap-2">
+          <ShieldAlert className="w-4 h-4 text-primary" />
+          <span>{t("settings.diagnosticsTitle", "Diagnostics & Disaster Recovery")}</span>
+        </h3>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <button
+            onClick={async () => {
+              try {
+                const ok = await checkDatabaseIntegrity();
+                if (ok) {
+                  alert(t("settings.dbIntegrityOk", "Database integrity check: PASSED. All tables and indices are healthy."));
+                } else {
+                  alert(t("settings.dbIntegrityFail", "Database integrity check returned errors."));
+                }
+              } catch (e) {
+                alert(`Error: ${e}`);
+              }
+            }}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-border hover:bg-secondary text-xs font-medium transition-all"
+          >
+            <Check className="w-4 h-4 text-emerald-500" />
+            <span>{t("settings.verifyDbIntegrity", "Verify SQLite Integrity")}</span>
+          </button>
+
+          <button
+            onClick={async () => {
+              try {
+                const report = await exportDiagnosticsReport();
+                const jsonStr = JSON.stringify(report, null, 2);
+                await navigator.clipboard.writeText(jsonStr);
+                alert(t("settings.diagnosticsCopied", "Sanitized diagnostics report copied to clipboard."));
+              } catch (e) {
+                alert(`Error: ${e}`);
+              }
+            }}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-border hover:bg-secondary text-xs font-medium transition-all"
+          >
+            <Copy className="w-4 h-4 text-primary" />
+            <span>{t("settings.exportDiagnostics", "Copy Diagnostics Report")}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 5. About & Version */}
       <div className="bg-card border border-border rounded-2xl p-6 shadow-sm space-y-4">
         <h3 className="font-semibold text-xs text-foreground uppercase tracking-wider flex items-center gap-2">
           <Info className="w-4 h-4 text-primary" />

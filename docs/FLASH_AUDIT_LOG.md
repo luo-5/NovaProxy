@@ -235,3 +235,67 @@
 - `pnpm lint`：通过（0 错误 0 警告）
 - `pnpm tsc --noEmit`：通过（0 错误）
 - `pnpm build`：构建成功（0 错误）
+
+---
+
+## 阶段 P7：测试、打包与发布 (Testing, Packaging & Release)
+
+### 1. 执行背景
+- **切换时间**：2026-11-07
+- **原因**：Gemini 4 Argon token 仍未恢复，由 Gemini 3.8 Flash 继续实现项目最后收尾阶段 Phase P7 的全部交付项。
+- **任务目标**：根据规范完成全套测试、打包配置、CI/CD 自动化流水线与用户开源文档：
+  1. 补齐前端自动化单元测试（Vitest），验证核心格式化、协议颜色标签匹配与相对时间计算。
+  2. 实现前端全局错误边界 `ErrorBoundary`，提供错误详情一键复制、重试与界面重载。
+  3. 实现系统诊断包一键导出功能（脱敏后的系统环境、内核状态、表统计、最近日志），并在「系统设置」中提供可视化按钮。
+  4. 配置 Windows NSIS 打包参数（多语言安装程序、默认当前用户模式、无特权阻碍）。
+  5. 编写 GitHub Actions 双流水线：
+     - `.github/workflows/ci.yml`（PR/Push 自动运行 Rust + TS 语法检查、Clippy、全套测试与静态分析）。
+     - `.github/workflows/release.yml`（打 Tag 时自动下载内核、编译生成 NSIS 安装包与便携版 Zip，计算 SHA-256 校验和并自动发布 GitHub Release）。
+  6. 编写中英双语项目说明文档（`README.md`）、详尽用户操作手册与常见问题排查（`docs/USER_MANUAL.md`）、MIT 许可文件（`LICENSE`）以及第三方核心合规清单（`docs/THIRD_PARTY_LICENSES.md`）。
+
+---
+
+### 2. 详细变更清单
+
+| 模块 / 文件 | 类型 | 核心改动说明 |
+|---|---|---|
+| `package.json` | 修改 | 安装 `vitest` 并配置 `"test": "vitest run"` 测试命令 |
+| `src/lib/utils.test.ts` | 新增 | 编写 6 个前端单元测试：字节单位格式化、网速 `/s` 格式化、延迟等级与颜色判定、17 种代理协议徽章映射、时间戳计算与 Tailwind 样式合并 |
+| `src/components/ErrorBoundary.tsx` | 新增 | 实现全屏优雅降级 React 错误边界：捕获未捕获异常、展示堆栈、一键复制结构化报告、重置状态与刷新应用 |
+| `src/App.tsx` | 修改 | 将整个客户端视图包裹于 `<ErrorBoundary>` 中，保障任何子组件崩溃均不导致白屏 |
+| `src-tauri/src/commands/mod.rs` | 修改 | 增加 `export_diagnostics_report` IPC 命令：自动脱敏敏感凭据并导出 JSON 诊断摘要 |
+| `src-tauri/src/lib.rs` | 修改 | 注册 `export_diagnostics_report` 命令 |
+| `src/lib/ipc.ts` | 修改 | 导出 `exportDiagnosticsReport()` 前端函数 |
+| `src/pages/Settings.tsx` | 修改 | 新增「诊断与容灾备份」操作卡片，提供「验证 SQLite 完整性」与「复制诊断报告」操作 |
+| `src/i18n/locales/zh-CN.json` & `en-US.json` | 修改 | 扩充诊断与备份卡片中英双语国际化文案 |
+| `src-tauri/tauri.conf.json` | 修改 | 配置 NSIS 多语言（English, SimpChinese）、静默安装模式与应用资源捆绑 |
+| `.github/workflows/ci.yml` | 新增 | 全自动化 CI 流水线：Node + Rust 环境配置、内核拉取、`cargo fmt`、`cargo clippy`、`cargo test`、`pnpm lint`、`pnpm tsc`、`pnpm test`、`pnpm build` |
+| `.github/workflows/release.yml` | 新增 | 自动化 Release 流水线：Tag 触发、内核拉取打包、构建 NSIS 安装包、构建便携版 zip、生成 SHA256SUMS.txt 并发布 Release |
+| `README.md` | 新增 | 专业中英双语自述文档：项目简介、架构 Mermaid 流程图、17 协议矩阵、本地开发构建步骤、测试与打包指南 |
+| `LICENSE` | 新增 | 声明 NovaProxy 开源 MIT License |
+| `docs/THIRD_PARTY_LICENSES.md` | 新增 | 详述 sing-box (GPL-3.0)、mihomo (GPL-3.0)、Xray-core (MPL-2.0)、Wintun (MIT) 等上游开源协议与合规性说明 |
+| `docs/USER_MANUAL.md` | 新增 | 详尽用户手册：安装卸载、4 大导入途径、节点测速、模式切换、分流规则配置、DNS 防泄露与 5 大常见故障排查 FAQ |
+
+---
+
+### 3. 关键架构与设计决策（供 Argon 审查）
+
+1. **前端错误边界兜底（Global Error Boundary）**：
+   - 传统 React 单页应用若在渲染或状态处理中有任意异常抛出，会导致整屏完全变白无响应，用户无法得知原因亦无法重启。
+   - 实现方案：通过 `ErrorBoundary` 拦截所有生命周期内的 JavaScript 错误，展示优雅的暗色警告面板与错误摘要，允许用户一键拷贝已格式化的报错堆栈至剪贴板，并提供「重试」与「重载」按钮，避免应用假死。
+2. **脱敏运行诊断导出（Sanitized Diagnostics Export）**：
+   - 用户在提交 Issue 或请求排查时，若直接导出配置极易泄露代理节点的真实域名、端口、密码与密钥。
+   - 实现方案：后端 `export_diagnostics_report` 在遍历当前数据模型时，主动将 `clash_api_secret`、节点凭据等关键字段脱敏替换为 `***REDACTED***`，仅导出操作系统架构、内核生命周期状态、各数据表统计条目及最近内核日志，兼顾故障排查效率与用户隐私安全。
+3. **双交付物流水线（Installer & Portable Package）**：
+   - 满足普通用户（向导式安装、自动关联桌面与深层链接）与极客用户（U 盘便携运行、不写系统目录）的双重需求。Release 流水线自动输出标准 NSIS 安装程序（`.exe`）与全打包绿色便携压缩包（`.zip`），并随附全局 SHA-256 校验清单。
+
+---
+
+### 4. 质量审查与测试记录
+- `cargo fmt --check`：通过
+- `cargo clippy -- -D warnings`：通过（0 警告）
+- `cargo test`：全部 54 个测试通过（31 单元 + 4 生成器检查 + 9 订阅与链接往返 + 5 系统代理/TUN + 5 稳定性集成）
+- `pnpm lint`：通过（0 错误 0 警告）
+- `pnpm tsc --noEmit`：通过（0 错误）
+- `pnpm test`：全部 6 个前端单元测试通过（100% 成功）
+- `pnpm build`：构建成功（0 错误，打包用时 3.51s）

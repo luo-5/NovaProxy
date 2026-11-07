@@ -177,6 +177,12 @@
     "darkTheme": "Dark Mode",
     "lightTheme": "Light Mode",
     "language": "Language",
+    "diagnosticsTitle": "Diagnostics & Disaster Recovery",
+    "verifyDbIntegrity": "Verify SQLite Integrity",
+    "exportDiagnostics": "Copy Diagnostics Report",
+    "dbIntegrityOk": "Database integrity check: PASSED. All tables and indices are healthy.",
+    "dbIntegrityFail": "Database integrity check returned errors.",
+    "diagnosticsCopied": "Sanitized diagnostics report copied to clipboard.",
     "about": "About NovaProxy",
     "version": "Client Version",
     "checkUpdate": "Check for Updates"

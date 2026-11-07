@@ -177,6 +177,12 @@
     "darkTheme": "深色模式",
     "lightTheme": "浅色模式",
     "language": "语言",
+    "diagnosticsTitle": "诊断与容灾备份",
+    "verifyDbIntegrity": "验证 SQLite 完整性",
+    "exportDiagnostics": "复制诊断报告",
+    "dbIntegrityOk": "数据库完整性检查：通过。所有数据表及索引状态良好。",
+    "dbIntegrityFail": "数据库完整性检查返回异常。",
+    "diagnosticsCopied": "已脱敏的运行诊断报告已复制到剪贴板。",
     "about": "关于 NovaProxy",
     "version": "客户端版本",
     "checkUpdate": "检查更新"

@@ -338,3 +338,7 @@ export async function checkDatabaseIntegrity(): Promise<boolean> {
 export async function backupDatabase(targetPath: string): Promise<void> {
   return await invoke<void>("backup_database", { targetPath });
 }
+
+export async function exportDiagnosticsReport(): Promise<Record<string, unknown>> {
+  return await invoke<Record<string, unknown>>("export_diagnostics_report");
+}

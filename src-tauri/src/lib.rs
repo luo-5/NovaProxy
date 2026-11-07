@@ -194,6 +194,7 @@ pub fn run() {
             commands::close_core_connection,
             commands::check_database_integrity,
             commands::backup_database,
+            commands::export_diagnostics_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NovaProxy application");
