@@ -1,9 +1,9 @@
 # 进度记录与交接清单
 
 ## 当前状态
-- **当前阶段**：P0 完成 -> 准备进入 P1
-- **当前执行模型**：Gemini-3.8-flash
-- **下一阶段**：P1（核心数据模型 + 内核管理器）
+- **当前阶段**：P1 完成 -> 准备进入 P2
+- **当前执行模型**：Gemini-4-Argon
+- **下一阶段**：P2（分享链接与订阅解析）
 - **下一执行模型**：Gemini-4-Argon
 
 ---
@@ -19,13 +19,13 @@
 - [x] 6. 初始化 Git 仓库，完善 `.gitignore`（严格忽略内核二进制与构建产物，保留 .gitkeep）
 - [x] 7. 确立 `docs/PLAN.md` 与 `docs/PROGRESS.md`，验收标准检查全绿（`cargo fmt`、`cargo clippy`、`cargo test`、`pnpm build` 全部通过）
 
-### 阶段 P1：核心数据模型 + 内核管理器（🧠 Gemini-4-Argon）
-- [ ] 1. 定义统一中间模型 `ProxyNode`、`Subscription`、`Settings`、`RoutingMode` 并支持 Serde/TS 类型导出
-- [ ] 2. SQLite 存储层实现（schema、migrations、CRUD）
-- [ ] 3. 内核能力与选核矩阵 `core/capabilities.rs`
-- [ ] 4. 内核生命周期管理 `core/process.rs`、`manager.rs`（Job Object、状态机、日志收集、端口冲突检测）
-- [ ] 5. 内核自动更新逻辑 `core/updater.rs`
-- [ ] 6. Tauri 基础命令导出与简单调试
+### 阶段 P1：核心数据模型 + 内核管理器（🧠 Gemini-4-Argon）- 【已完成】
+- [x] 1. 定义统一中间模型 `ProxyNode`、`Subscription`、`Settings`、`RoutingMode` 并支持 Serde/TS 类型导出（`src/types/bindings.ts`）
+- [x] 2. SQLite 存储层实现（schema、`001_initial.sql` migrations、线程安全 `Database` CRUD 与级联删除）
+- [x] 3. 内核能力与选核矩阵 `core/capabilities.rs`（覆盖全部 17 种协议与 8 种传输层、XHTTP/mKCP 特殊路由、热重载 JSON 能力表与自动降级选核）
+- [x] 4. 内核生命周期管理 `core/process.rs`、`manager.rs`（Windows Job Object `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 防残留进程、`CREATE_NO_WINDOW`、`Stopped → Starting → Running → Stopping / Crashed` 状态机、`LogRingBuffer` 实时日志推送、端口占用检测与自动顺延重写）
+- [x] 5. 内核自动更新逻辑 `core/updater.rs`（支持经当前代理 HTTP/SOCKS 下载、SHA-256 校验、版本启动自检、失败自动回滚并更新 `cores.lock.json`）
+- [x] 6. Tauri 基础命令导出与简单调试（`core_start`, `core_stop`, `core_restart`, `core_status`, `core_logs`, `core_clear_logs`, `core_default_config`，并在前端 `Dashboard.tsx` 与 `Logs.tsx` 联调最小可运行 `sing-box` 配置）
 
 ### 阶段 P2：分享链接与订阅解析（🧠 Gemini-4-Argon）
 - [ ] 1. 各协议单链接解析器与生成器（vmess, vless, trojan, ss, ssr, hy2, tuic 等）
@@ -76,9 +76,12 @@
 ## 决策记录（Architecture Decision Log）
 - **2026-11-07 P0**：选定技术栈 Tauri 2 (Rust) + React 18 + TS + Tailwind + Vite。内核采用多内核架构（主 sing-box，副 mihomo 与 Xray），通过子进程 + Job Object 隔离运行。
 - **2026-11-07 P0**：Windows 端默认启用 WebView2，系统代理使用 WinINet API，TUN 规划支持提权服务。
+- **2026-11-07 P1**：
+  - 使用 `ts-rs` 将 Rust 端核心数据模型自动生成到 `src/types/bindings.ts`（通过 `model::tests::test_export_typescript_bindings` 在 `cargo test` 时自动同步更新），确保前后端类型 100% 对齐。
+  - 在 `core/process.rs` 中直接通过 Win32 FFI 调用 `CreateJobObjectW` + `SetInformationJobObject(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)` + `AssignProcessToJobObject`，保证主进程异常退出或被强杀时 Windows 内核自动清理所有内核子进程。
+  - 在 `src-tauri/build.rs` 中为 `--lib` 单元测试可执行文件注入 `libresource.a`（包含 `Microsoft.Windows.Common-Controls v6.0.0.0` SxS Manifest），解决 Windows GNU 目标下 `comctl32.dll` 的 `TaskDialogIndirect` 符号加载问题。
 
 ---
 
 ## 已知问题与遗留项
-- 需等待 Rustup 安装完成并在当前会话加载 Rust 环境变量。
-- 确认 C++ 编译器（MSVC 或 MinGW）满足 Tauri 2 编译要求。
+- 在 PowerShell 会话中运行 Cargo 命令时，需确保将 WinLibs MinGW-w64 (`C:\Users\31752\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin`) 与 `$env:USERPROFILE\.cargo\bin` 加入 `$env:PATH`，且 `CARGO_TARGET_DIR` 保持 ASCII 路径（已在 `src-tauri/.cargo/config.toml` 中配置）。

@@ -17,4 +17,13 @@ fn main() {
 
     let attrs = tauri_build::Attributes::new().windows_attributes(windows_attr);
     tauri_build::try_build(attrs).expect("failed to run tauri-build");
+
+    // Ensure unit test binaries (--lib) also receive the Common-Controls v6 SxS manifest
+    // required by comctl32.dll (TaskDialogIndirect) on Windows GNU targets.
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let resource_obj = PathBuf::from(&out_dir).join("libresource.a");
+        if resource_obj.exists() {
+            println!("cargo:rustc-link-arg={}", resource_obj.display());
+        }
+    }
 }

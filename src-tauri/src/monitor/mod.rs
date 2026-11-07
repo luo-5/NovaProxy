@@ -5,3 +5,5 @@ pub mod connections;
 pub mod latency;
 pub mod logs;
 pub mod traffic;
+
+pub use logs::{CoreLogEntry, LogRingBuffer, LogStream, DEFAULT_LOG_RING_CAPACITY};
