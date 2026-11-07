@@ -1,9 +1,9 @@
 # 进度记录与交接清单
 
 ## 当前状态
-- **当前阶段**：P1 完成 -> 准备进入 P2
+- **当前阶段**：P2 完成 -> 准备进入 P3
 - **当前执行模型**：Gemini-4-Argon
-- **下一阶段**：P2（分享链接与订阅解析）
+- **下一阶段**：P3（配置生成器、路由与 DNS）
 - **下一执行模型**：Gemini-4-Argon
 
 ---
@@ -27,13 +27,13 @@
 - [x] 5. 内核自动更新逻辑 `core/updater.rs`（支持经当前代理 HTTP/SOCKS 下载、SHA-256 校验、版本启动自检、失败自动回滚并更新 `cores.lock.json`）
 - [x] 6. Tauri 基础命令导出与简单调试（`core_start`, `core_stop`, `core_restart`, `core_status`, `core_logs`, `core_clear_logs`, `core_default_config`，并在前端 `Dashboard.tsx` 与 `Logs.tsx` 联调最小可运行 `sing-box` 配置）
 
-### 阶段 P2：分享链接与订阅解析（🧠 Gemini-4-Argon）
-- [ ] 1. 各协议单链接解析器与生成器（vmess, vless, trojan, ss, ssr, hy2, tuic 等）
-- [ ] 2. 订阅格式自动识别与解析（Base64, Clash YAML, sing-box JSON, SIP008）
-- [ ] 3. 订阅网络下载与流量信息解析
-- [ ] 4. 节点去重与增量更新逻辑
-- [ ] 5. 剪贴板导入与二维码解析
-- [ ] 6. 测试用例与 Fixture 验证
+### 阶段 P2：分享链接与订阅解析（🧠 Gemini-4-Argon）- 【已完成】
+- [x] 1. 各协议单链接解析器与生成器（`vmess`, `vless`, `trojan`, `ss`, `ssr`, `hysteria`, `hysteria2`, `tuic`, `wireguard`, 以及 `anytls`, `shadowtls`, `naive`, `snell`, `mieru`, `ssh`, `socks5`, `http` 共 17 种协议的 `parse` 与 `to_uri` 双向实现）
+- [x] 2. 订阅格式自动识别与容错解析（自动识别纯文本多行分享链接、Base64/URL-safe Base64 编码订阅、Clash/Mihomo YAML、sing-box JSON、SIP008 JSON、WireGuard `.conf` INI，自动剥离 BOM/CRLF，单行损坏记录警告并跳过而不中断整体导入）
+- [x] 3. 订阅网络下载与流量信息解析（支持自定义 `User-Agent`、超时与失败指数退避重试、可选经本地混合代理端口更新、解析 `subscription-userinfo` / `profile-update-interval` / `profile-web-page-url` 响应头）
+- [x] 4. 节点去重与增量更新逻辑（基于 SHA-256 节点指纹 `compute_fingerprint()` 去重，`Database::sync_subscription_nodes` 在单事务内增量合并，保留已有节点的 `id`、用户自定义名称 `name`、排序 `sort_order`、测速延迟 `latency` 与分组归属）
+- [x] 5. 剪贴板批量导入与二维码编解码（`qrcode` 生成 SVG/PNG 二维码，`rqrr` + `image` 解码图片二维码，Win32 GDI 虚拟屏幕截屏识别桌面二维码，并导出对应 Tauri IPC 命令与 `src/lib/ipc.ts` 封装）
+- [x] 6. 测试用例与 Fixture 验证（`src-tauri/tests/fixtures/` 覆盖各协议 >= 5 个样本，含 IPv6、中文/Emoji 名称、URL 编码、缺可选字段、Clash YAML、sing-box JSON、SIP008 JSON、WireGuard `.conf`，全部通过 `parse -> to_uri -> parse` 往返一致性测试与 HTTP 模拟订阅服务器重试测试）
 
 ### 阶段 P3：配置生成器、路由与 DNS（🧠 Gemini-4-Argon）
 - [ ] 1. `ProxyNode` -> sing-box / mihomo / Xray 配置生成器
@@ -80,6 +80,10 @@
   - 使用 `ts-rs` 将 Rust 端核心数据模型自动生成到 `src/types/bindings.ts`（通过 `model::tests::test_export_typescript_bindings` 在 `cargo test` 时自动同步更新），确保前后端类型 100% 对齐。
   - 在 `core/process.rs` 中直接通过 Win32 FFI 调用 `CreateJobObjectW` + `SetInformationJobObject(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)` + `AssignProcessToJobObject`，保证主进程异常退出或被强杀时 Windows 内核自动清理所有内核子进程。
   - 在 `src-tauri/build.rs` 中为 `--lib` 单元测试可执行文件注入 `libresource.a`（包含 `Microsoft.Windows.Common-Controls v6.0.0.0` SxS Manifest），解决 Windows GNU 目标下 `comctl32.dll` 的 `TaskDialogIndirect` 符号加载问题。
+- **2026-11-07 P2**：
+  - 统一抽象 `parser/uri_common.rs` 处理 v2rayN / Xray / sing-box 的传输层参数（`type`, `host`, `path`, `serviceName`, `mode`, `headerType`, `seed`, `ed`, `eh`）与安全层参数（`security`, `sni`, `alpn`, `fp`, `pbk`, `sid`, `spx`, `allowInsecure`），以及 IPv6 `[...]` 规范化。
+  - 屏幕二维码扫描在 `parser/qrcode.rs` 中使用纯 Win32 GDI (`GetSystemMetrics` + `BitBlt` + `GetDIBits`) 捕获多显示器虚拟桌面并交由 `rqrr` 识别，避免引入额外 C/C++ 编译依赖。
+  - 订阅增量更新 (`Database::sync_subscription_nodes`) 通过 SHA-256 节点指纹匹配已有节点，在更新连接参数的同时无损保留用户自定义节点名称、自定义排序、历史延迟及分组绑定。
 
 ---
 

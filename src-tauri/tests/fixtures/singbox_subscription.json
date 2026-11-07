@@ -1,0 +1,86 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": ["hk-vless", "us-vmess", "jp-hy2", "sg-ss"]
+    },
+    {
+      "type": "vless",
+      "tag": "🇭🇰 香港 VLESS-REALITY",
+      "server": "hk-sb.example.com",
+      "server_port": 443,
+      "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0001",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "SbRealityPublicKeyDummy0000000000000000000",
+          "short_id": "a1b2c3d4"
+        }
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "🇺🇸 美国 VMess-WS",
+      "server": "us-sb.example.com",
+      "server_port": 443,
+      "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeee0002",
+      "security": "auto",
+      "alter_id": 0,
+      "tls": {
+        "enabled": true,
+        "server_name": "us-sb.example.com",
+        "alpn": ["h2", "http/1.1"]
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/ws-sb",
+        "headers": {
+          "Host": "us-sb.example.com"
+        },
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "🇯🇵 日本 Hysteria2",
+      "server": "jp-sb.example.com",
+      "server_port": 443,
+      "password": "sb-hy2-dummy-password",
+      "up_mbps": 100,
+      "down_mbps": 500,
+      "obfs": {
+        "type": "salamander",
+        "password": "sb-obfs-dummy-password"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "jp-sb.example.com"
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "🇸🇬 新加坡 SS-2022",
+      "server": "sg-sb.example.com",
+      "server_port": 8388,
+      "method": "2022-blake3-aes-256-gcm",
+      "password": "sb-ss2022-dummy-password==",
+      "udp_over_tcp": true
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+
+proxies:
+  - name: "🇭🇰 香港 SS-2022 节点 01"
+    type: ss
+    server: hk01.example.com
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: "syntheticsamplekey000000=="
+    udp: true
+    udp-over-tcp: true
+
+  - name: "🇯🇵 东京 SS-Obfs 节点 02"
+    type: ss
+    server: jp02.example.com
+    port: 8389
+    cipher: aes-256-gcm
+    password: "test-password-jp-02"
+    plugin: obfs
+    plugin-opts:
+      mode: tls
+      host: cloudflare.example.com
+
+  - name: "🇸🇬 新加坡 SSR 节点 03"
+    type: ssr
+    server: sg03.example.com
+    port: 9001
+    cipher: chacha20-ietf
+    password: "ssr-dummy-password"
+    protocol: auth_aes128_md5
+    protocol-param: "12345:abcdef"
+    obfs: tls1.2_ticket_auth
+    obfs-param: "cdn.example.com"
+
+  - name: "🇺🇸 洛杉矶 VMess-WS-TLS 04"
+    type: vmess
+    server: us04.example.com
+    port: 443
+    uuid: "11111111-2222-3333-4444-555555555555"
+    alterId: 0
+    cipher: auto
+    tls: true
+    servername: us04.example.com
+    skip-cert-verify: false
+    client-fingerprint: chrome
+    network: ws
+    ws-opts:
+      path: "/vmess-ws?ed=2048"
+      headers:
+        Host: us04.example.com
+      max-early-data: 2048
+      early-data-header-name: Sec-WebSocket-Protocol
+
+  - name: "🇩🇪 法兰克福 VLESS-REALITY-Vision 05"
+    type: vless
+    server: "2001:db8::5"
+    port: 443
+    uuid: "22222222-3333-4444-5555-666666666666"
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+    servername: www.example.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: "DummyRealityPublicKeyForTestingOnly00000000"
+      short-id: "0123456789abcdef"
+      spider-x: "/spider"
+
+  - name: "🇬🇧 伦敦 Trojan-gRPC 06"
+    type: trojan
+    server: uk06.example.com
+    port: 443
+    password: "trojan-secret-password-06"
+    sni: uk06.example.com
+    alpn:
+      - h2
+    network: grpc
+    grpc-opts:
+      grpc-service-name: "trojan-grpc-svc"
+
+  - name: "🇰🇷 首尔 Hysteria2 端口跳跃 07"
+    type: hysteria2
+    server: kr07.example.com
+    port: 443
+    ports: "20000-40000"
+    password: "hy2-dummy-password-07"
+    up: "50 Mbps"
+    down: "300 Mbps"
+    obfs: salamander
+    obfs-password: "salamander-dummy-secret"
+    sni: kr07.example.com
+    skip-cert-verify: false
+
+  - name: "🇫🇷 巴黎 TUIC-v5 08"
+    type: tuic
+    server: fr08.example.com
+    port: 8443
+    uuid: "33333333-4444-5555-6666-777777777777"
+    password: "tuic-dummy-password-08"
+    congestion-controller: bbr
+    udp-relay-mode: native
+    reduce-rtt: true
+    sni: fr08.example.com
+    alpn:
+      - h3
+
+  - name: "🇨🇦 多伦多 WireGuard 09"
+    type: wireguard
+    server: ca09.example.com
+    port: 51820
+    ip: 10.0.0.2/32
+    ipv6: fd00::2/128
+    private-key: "WGPrivateKeyDummy00000000000000000000000000="
+    public-key: "WGPublicKeyDummy000000000000000000000000000="
+    pre-shared-key: "WGPresharedKeyDummy000000000000000000000000="
+    mtu: 1420
+
+  - name: "🇦🇺 悉尼 AnyTLS 10"
+    type: anytls
+    server: au10.example.com
+    port: 443
+    password: "anytls-dummy-password-10"
+    sni: au10.example.com
+    client-fingerprint: firefox
+
+  - name: "🇳🇱 阿姆斯特丹 Hysteria-v1 11"
+    type: hysteria
+    server: nl11.example.com
+    port: 4433
+    auth-str: "hy1-dummy-auth-11"
+    protocol: udp
+    up: 100
+    down: 200
+    sni: nl11.example.com
+    obfs: xplus-dummy
+
+  - name: "🇸🇪 斯德哥尔摩 Snell-v4 12"
+    type: snell
+    server: se12.example.com
+    port: 9443
+    psk: "snell-dummy-psk-12"
+    version: 4
+    obfs-opts:
+      mode: tls
+      host: se12.example.com
+
+  - name: "🇨🇭 苏黎世 Mieru 13"
+    type: mieru
+    server: ch13.example.com
+    port: 10443
+    username: "mieru-user-13"
+    password: "mieru-pass-13"
+    transport: TCP
+    multiplexing: MULTIPLEXING_HIGH
+
+  - name: "🇮🇳 孟买 SSH 14"
+    type: ssh
+    server: in14.example.com
+    port: 22
+    username: "proxyuser"
+    password: "ssh-dummy-password-14"
+
+  - name: "🇧🇷 圣保罗 SOCKS5 15"
+    type: socks5
+    server: br15.example.com
+    port: 1080
+    username: "socksuser"
+    password: "sockspass"
+    udp: true
+
+  - name: "🇹🇷 伊斯坦布尔 HTTP 16"
+    type: http
+    server: tr16.example.com
+    port: 8080
+    username: "httpuser"
+    password: "httppass"
+    tls: true
+    sni: tr16.example.com
+
+  - name: "Broken Node Should Be Skipped"
+    type: vless
+    server: broken.example.com
+    port: 0

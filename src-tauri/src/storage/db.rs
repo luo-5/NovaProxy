@@ -421,6 +421,115 @@ impl Database {
         Ok(affected > 0)
     }
 
+    /// Incrementally synchronizes nodes for a subscription inside a single transaction:
+    /// - Matches existing nodes by deterministic SHA-256 fingerprint
+    /// - Preserves existing node `id`, custom `name`, `sort_order`, `latency`, and `group_id`
+    /// - Removes obsolete nodes no longer present in the subscription
+    pub fn sync_subscription_nodes(
+        &self,
+        subscription_id: &str,
+        incoming_nodes: Vec<ProxyNode>,
+    ) -> StorageResult<Vec<ProxyNode>> {
+        let existing = self.list_nodes_by_subscription(subscription_id)?;
+        let merged =
+            crate::parser::merge_subscription_nodes(subscription_id, &existing, incoming_nodes);
+
+        let keep_ids: std::collections::HashSet<&str> =
+            merged.iter().map(|n| n.id.as_str()).collect();
+
+        let now = Utc::now().timestamp();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+
+        for old in &existing {
+            if !keep_ids.contains(old.id.as_str()) {
+                tx.execute("DELETE FROM nodes WHERE id = ?1", params![old.id])?;
+            }
+        }
+
+        for node in &merged {
+            let fingerprint = node.compute_fingerprint();
+            let node_json = serde_json::to_string(node)?;
+            tx.execute(
+                "INSERT INTO nodes (
+                    id, name, server, port, protocol, subscription_id, group_id,
+                    fingerprint, latency_ms, sort_order, node_json, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    server = excluded.server,
+                    port = excluded.port,
+                    protocol = excluded.protocol,
+                    subscription_id = excluded.subscription_id,
+                    group_id = excluded.group_id,
+                    fingerprint = excluded.fingerprint,
+                    latency_ms = excluded.latency_ms,
+                    sort_order = excluded.sort_order,
+                    node_json = excluded.node_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    node.id,
+                    node.name,
+                    node.server,
+                    node.port,
+                    node.protocol.as_str(),
+                    node.subscription_id,
+                    node.group_id,
+                    fingerprint,
+                    node.latency,
+                    node.sort_order,
+                    node_json,
+                    now,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(merged)
+    }
+
+    /// Imports manually added or clipboard-pasted nodes with fingerprint deduplication
+    pub fn import_manual_nodes(
+        &self,
+        incoming_nodes: Vec<ProxyNode>,
+    ) -> StorageResult<Vec<ProxyNode>> {
+        let deduped = crate::parser::deduplicate_nodes(incoming_nodes);
+        let all_existing = self.list_nodes()?;
+        let mut existing_manual_by_fp = std::collections::HashMap::new();
+        let mut max_sort_order = all_existing
+            .iter()
+            .map(|n| n.sort_order)
+            .max()
+            .unwrap_or(-1);
+
+        for node in &all_existing {
+            if node.subscription_id.is_none() {
+                existing_manual_by_fp.insert(node.compute_fingerprint(), node);
+            }
+        }
+
+        let mut saved = Vec::with_capacity(deduped.len());
+        for mut node in deduped {
+            let fp = node.compute_fingerprint();
+            if let Some(prev) = existing_manual_by_fp.get(&fp) {
+                node.id = prev.id.clone();
+                if !prev.name.trim().is_empty() {
+                    node.name = prev.name.clone();
+                }
+                node.sort_order = prev.sort_order;
+                node.latency = prev.latency;
+                node.group_id = prev.group_id.clone();
+            } else {
+                max_sort_order += 1;
+                node.sort_order = max_sort_order;
+            }
+            self.upsert_node(&node)?;
+            saved.push(node);
+        }
+
+        Ok(saved)
+    }
+
     // ==================== Latency History & Updates ====================
 
     /// Records a new latency measurement and updates the node's latest latency column

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "sip008-node-1",
+      "remarks": "🇭🇰 SIP008 香港 01",
+      "server": "sip01.example.com",
+      "server_port": 8388,
+      "password": "sip008-dummy-password-1",
+      "method": "aes-256-gcm"
+    },
+    {
+      "id": "sip008-node-2",
+      "remarks": "🇯🇵 SIP008 东京 02 (IPv6)",
+      "server": "2001:db8::8388",
+      "server_port": 8389,
+      "password": "sip008-dummy-password-2",
+      "method": "chacha20-ietf-poly1305",
+      "plugin": "obfs-local",
+      "plugin_opts": "obfs=http;obfs-host=www.example.com"
+    }
+  ]
+}

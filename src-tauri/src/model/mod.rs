@@ -14,6 +14,7 @@ use crate::core::{
     CoreStartRequest, CoreStatusInfo, CoreUpdateCheckResult, CoreUpdateResult, SelectionReason,
 };
 use crate::monitor::{CoreLogEntry, LogStream};
+use crate::parser::{SubscriptionFormat, SubscriptionParseReport, SubscriptionUserInfo};
 use ts_rs::TS;
 
 /// Generates consolidated TypeScript type definitions for all IPC models using `ts-rs`
@@ -63,6 +64,9 @@ pub fn generate_typescript_bindings() -> String {
         CoreLockEntry::decl(),
         CoreUpdateCheckResult::decl(),
         CoreUpdateResult::decl(),
+        SubscriptionFormat::decl(),
+        SubscriptionParseReport::decl(),
+        SubscriptionUserInfo::decl(),
     ];
 
     let mut out = String::from(

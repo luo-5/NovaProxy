@@ -88,3 +88,9 @@ export type CoreUpdateCheckResult = { core: CoreType, current_version: string | 
 
 export type CoreUpdateResult = { core: CoreType, previous_version: string | null, new_version: string, sha256: string, };
 
+export type SubscriptionFormat = "plain_links" | "base64_links" | "clash_yaml" | "sing_box_or_sip008_json" | "wire_guard_conf";
+
+export type SubscriptionParseReport = { format: SubscriptionFormat, nodes: Array<ProxyNode>, warnings: Array<string>, };
+
+export type SubscriptionUserInfo = { upload: number | null, download: number | null, total: number | null, expire: number | null, update_interval_mins: number | null, home_url: string | null, };
+

@@ -4,6 +4,9 @@ import type {
   CoreLogEntry,
   CoreStartRequest,
   CoreStatusInfo,
+  ProxyNode,
+  Subscription,
+  SubscriptionParseReport,
 } from "../types/bindings";
 
 export type {
@@ -26,6 +29,9 @@ export type {
   ProxyNode,
   RoutingMode,
   Subscription,
+  SubscriptionFormat,
+  SubscriptionParseReport,
+  SubscriptionUserInfo,
   TlsConfig,
   TransportConfig,
   TransportKind,
@@ -87,4 +93,76 @@ export async function onCoreStatusChange(
   return await listen<CoreStatusInfo>("core://status", (event) => {
     handler(event.payload);
   });
+}
+
+// ==================== Phase P2: Share Links, Subscriptions & QR Code ====================
+
+export async function parseLink(uri: string): Promise<ProxyNode> {
+  return await invoke<ProxyNode>("parse_link", { uri });
+}
+
+export async function exportNodeLink(node: ProxyNode): Promise<string> {
+  return await invoke<string>("export_node_link", { node });
+}
+
+export async function parseSubscriptionText(
+  content: string
+): Promise<SubscriptionParseReport> {
+  return await invoke<SubscriptionParseReport>("parse_subscription_text", {
+    content,
+  });
+}
+
+export async function importClipboardNodes(
+  content: string
+): Promise<SubscriptionParseReport> {
+  return await invoke<SubscriptionParseReport>("import_clipboard_nodes", {
+    content,
+  });
+}
+
+export async function listNodes(subscriptionId?: string): Promise<ProxyNode[]> {
+  return await invoke<ProxyNode[]>("list_nodes", { subscriptionId });
+}
+
+export async function upsertNode(node: ProxyNode): Promise<ProxyNode> {
+  return await invoke<ProxyNode>("upsert_node", { node });
+}
+
+export async function deleteNode(id: string): Promise<boolean> {
+  return await invoke<boolean>("delete_node", { id });
+}
+
+export async function listSubscriptions(): Promise<Subscription[]> {
+  return await invoke<Subscription[]>("list_subscriptions");
+}
+
+export async function upsertSubscription(
+  subscription: Subscription
+): Promise<Subscription> {
+  return await invoke<Subscription>("upsert_subscription", { subscription });
+}
+
+export async function deleteSubscription(id: string): Promise<boolean> {
+  return await invoke<boolean>("delete_subscription", { id });
+}
+
+export async function refreshSubscription(
+  id: string
+): Promise<SubscriptionParseReport> {
+  return await invoke<SubscriptionParseReport>("refresh_subscription", { id });
+}
+
+export async function encodeNodeQr(node: ProxyNode): Promise<string> {
+  return await invoke<string>("encode_node_qr", { node });
+}
+
+export async function decodeQrImageBase64(
+  imageBase64: string
+): Promise<string[]> {
+  return await invoke<string[]>("decode_qr_image_base64", { imageBase64 });
+}
+
+export async function scanScreenQr(): Promise<string[]> {
+  return await invoke<string[]>("scan_screen_qr");
 }

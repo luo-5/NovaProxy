@@ -80,6 +80,20 @@ pub fn run() {
             commands::core_status,
             commands::core_logs,
             commands::core_clear_logs,
+            commands::parse_link,
+            commands::export_node_link,
+            commands::parse_subscription_text,
+            commands::import_clipboard_nodes,
+            commands::list_nodes,
+            commands::upsert_node,
+            commands::delete_node,
+            commands::list_subscriptions,
+            commands::upsert_subscription,
+            commands::delete_subscription,
+            commands::refresh_subscription,
+            commands::encode_node_qr,
+            commands::decode_qr_image_base64,
+            commands::scan_screen_qr,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NovaProxy application");
