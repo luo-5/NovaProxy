@@ -1,10 +1,10 @@
 # 进度记录与交接清单
 
 ## 当前状态
-- **当前阶段**：P2 完成 -> 准备进入 P3
-- **当前执行模型**：Gemini-4-Argon
-- **下一阶段**：P3（配置生成器、路由与 DNS）
-- **下一执行模型**：Gemini-4-Argon
+- **当前阶段**：P3 完成 -> 准备进入 P4
+- **当前执行模型**：Gemini-3.8-flash（因 Argon token 耗尽交接，审计文档见 docs/FLASH_AUDIT_LOG.md）
+- **下一阶段**：P4（系统代理与 TUN 模式）
+- **下一执行模型**：Gemini-4-Argon（若仍无 token 可由 Gemini-3.8-flash 继续）
 
 ---
 
@@ -35,13 +35,13 @@
 - [x] 5. 剪贴板批量导入与二维码编解码（`qrcode` 生成 SVG/PNG 二维码，`rqrr` + `image` 解码图片二维码，Win32 GDI 虚拟屏幕截屏识别桌面二维码，并导出对应 Tauri IPC 命令与 `src/lib/ipc.ts` 封装）
 - [x] 6. 测试用例与 Fixture 验证（`src-tauri/tests/fixtures/` 覆盖各协议 >= 5 个样本，含 IPv6、中文/Emoji 名称、URL 编码、缺可选字段、Clash YAML、sing-box JSON、SIP008 JSON、WireGuard `.conf`，全部通过 `parse -> to_uri -> parse` 往返一致性测试与 HTTP 模拟订阅服务器重试测试）
 
-### 阶段 P3：配置生成器、路由与 DNS（🧠 Gemini-4-Argon）
-- [ ] 1. `ProxyNode` -> sing-box / mihomo / Xray 配置生成器
-- [ ] 2. 入站、出站组、分流模式定义
-- [ ] 3. 路由规则集（geosite, geoip, 自定义规则）
-- [ ] 4. DNS 分流与防泄露机制
-- [ ] 5. 跨内核协同与链式代理方案
-- [ ] 6. 快照测试与内核配置有效性 check
+### 阶段 P3：配置生成器、路由与 DNS（🤖 Gemini-3.8-flash 代跑，记录至 docs/FLASH_AUDIT_LOG.md）- 【已完成】
+- [x] 1. `ProxyNode` -> sing-box / mihomo / Xray 配置生成器（`generator/singbox.rs`, `generator/mihomo.rs`, `generator/xray.rs`，覆盖 17 种协议、全部 8 种传输层、TLS/REALITY/Vision 参数）
+- [x] 2. 入站、出站组、分流模式定义（mixed 端口、可选局域网共享与认证，自动测速 `urltest`、手动选择 `selector`、故障转移 `fallback`、负载均衡 `loadbalance`）
+- [x] 3. 路由规则集（`generator/routing.rs`：中国大陆直连 geosite/geoip、广告拦截、私网绕行，sing-box .srs 远程规则集与 mihomo rule-providers，用户自定义分流规则拖拽排序与图形化模型）
+- [x] 4. DNS 分流与防泄露机制（`generator/dns.rs`：分流 DNS 国内直连 + 远程加密 DoH、Fake-IP 地址池分配与规则劫持）
+- [x] 5. 跨内核协同与链式代理方案（`generator/mod.rs`：`generate_multi_core_relay` 实现 Xray 独占协议如 XHTTP/mKCP 作为上游 SOCKS5 本地中继，sing-box 作为主内核负责路由与 TUN；支持 `dialer_proxy` 前置代理）
+- [x] 6. 快照测试与内核配置有效性 check（`tests/generator_check_test.rs`：调用实际 `sing-box.exe check`、`mihomo.exe -t`、`xray.exe run -test` 对生成配置进行端到端静态校验，全部绿灯通过）
 
 ### 阶段 P4：系统代理与 TUN 模式（🧠 Gemini-4-Argon）
 - [ ] 1. WinINet 系统代理设置与异常恢复
@@ -84,6 +84,11 @@
   - 统一抽象 `parser/uri_common.rs` 处理 v2rayN / Xray / sing-box 的传输层参数（`type`, `host`, `path`, `serviceName`, `mode`, `headerType`, `seed`, `ed`, `eh`）与安全层参数（`security`, `sni`, `alpn`, `fp`, `pbk`, `sid`, `spx`, `allowInsecure`），以及 IPv6 `[...]` 规范化。
   - 屏幕二维码扫描在 `parser/qrcode.rs` 中使用纯 Win32 GDI (`GetSystemMetrics` + `BitBlt` + `GetDIBits`) 捕获多显示器虚拟桌面并交由 `rqrr` 识别，避免引入额外 C/C++ 编译依赖。
   - 订阅增量更新 (`Database::sync_subscription_nodes`) 通过 SHA-256 节点指纹匹配已有节点，在更新连接参数的同时无损保留用户自定义节点名称、自定义排序、历史延迟及分组绑定。
+- **2026-11-07 P3**：
+  - 因 Gemini 4 Argon token 耗尽，阶段 P3 由 **Gemini 3.8 Flash** 完成全部功能实现并整理详细交接审计文档：`docs/FLASH_AUDIT_LOG.md` 与 `docs/FLASH_AUDIT_LOG.json`。
+  - sing-box 1.14 语法调整：WireGuard 按照最新标准生成顶级 `endpoints: [{"type": "wireguard", "peers": [{"allowed_ips": ["0.0.0.0/0", "::/0"], ...}]}]`，outbound/selector 直连其 tag；ShadowTLS 采用外层 shadowtls 出站 + 内层 Shadowsocks 的 `detour` 链式调用；NaiveProxy 在无 `libcronet.dll` 时自动降级为具有相同 HTTP/2 CONNECT + TLS/uTLS 特性的 `http` 出站。
+  - Xray-core 私有 IP 绕行规则使用显式 CIDR 列表生成，规避内核运行目录缺少 `geoip.dat` 时的解析失败。
+  - 编写 `tests/generator_check_test.rs`，端到端调用真实的 `sing-box.exe check`、`mihomo.exe -t`、`xray.exe run -test` 对生成配置进行校验，并验证多内核协同中继（Xray 上游 + sing-box 主控）。全部 35 个测试（22 单元 + 4 内核校验 + 9 订阅与链接往返）全部通过。
 
 ---
 

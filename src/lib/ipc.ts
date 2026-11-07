@@ -4,7 +4,11 @@ import type {
   CoreLogEntry,
   CoreStartRequest,
   CoreStatusInfo,
+  CoreType,
+  DnsSettings,
   ProxyNode,
+  RoutingSettings,
+  RuleItem,
   Subscription,
   SubscriptionParseReport,
 } from "../types/bindings";
@@ -19,6 +23,8 @@ export type {
   CoreStartRequest,
   CoreStatusInfo,
   CoreType,
+  DnsSettings,
+  DnsStrategy,
   GroupType,
   LatencyRecord,
   LogLevel,
@@ -28,6 +34,10 @@ export type {
   ProtocolType,
   ProxyNode,
   RoutingMode,
+  RoutingSettings,
+  RuleAction,
+  RuleItem,
+  RuleType,
   Subscription,
   SubscriptionFormat,
   SubscriptionParseReport,
@@ -165,4 +175,49 @@ export async function decodeQrImageBase64(
 
 export async function scanScreenQr(): Promise<string[]> {
   return await invoke<string[]>("scan_screen_qr");
+}
+
+// ==================== Phase P3: Routing, DNS & Config Generation ====================
+
+export async function getRoutingSettings(): Promise<RoutingSettings> {
+  return await invoke<RoutingSettings>("get_routing_settings");
+}
+
+export async function saveRoutingSettings(
+  settings: RoutingSettings
+): Promise<RoutingSettings> {
+  return await invoke<RoutingSettings>("save_routing_settings", { settings });
+}
+
+export async function listRoutingRules(): Promise<RuleItem[]> {
+  return await invoke<RuleItem[]>("list_routing_rules");
+}
+
+export async function upsertRoutingRule(rule: RuleItem): Promise<RuleItem> {
+  return await invoke<RuleItem>("upsert_routing_rule", { rule });
+}
+
+export async function deleteRoutingRule(id: string): Promise<boolean> {
+  return await invoke<boolean>("delete_routing_rule", { id });
+}
+
+export async function reorderRoutingRules(ids: string[]): Promise<void> {
+  return await invoke<void>("reorder_routing_rules", { ids });
+}
+
+export async function getDnsSettings(): Promise<DnsSettings> {
+  return await invoke<DnsSettings>("get_dns_settings");
+}
+
+export async function saveDnsSettings(
+  settings: DnsSettings
+): Promise<DnsSettings> {
+  return await invoke<DnsSettings>("save_dns_settings", { settings });
+}
+
+export async function generateConfig(
+  coreType?: CoreType,
+  activeNodeId?: string
+): Promise<string> {
+  return await invoke<string>("generate_config", { coreType, activeNodeId });
 }

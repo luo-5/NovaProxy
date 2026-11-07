@@ -94,3 +94,15 @@ export type SubscriptionParseReport = { format: SubscriptionFormat, nodes: Array
 
 export type SubscriptionUserInfo = { upload: number | null, download: number | null, total: number | null, expire: number | null, update_interval_mins: number | null, home_url: string | null, };
 
+export type RuleType = "domain" | "domain_suffix" | "domain_keyword" | "domain_regex" | "ip_cidr" | "process_name" | "port" | "geo_site" | "geo_ip";
+
+export type RuleAction = { "type": "proxy" } | { "type": "direct" } | { "type": "block" } | { "type": "tag", "target": string };
+
+export type RuleItem = { id: string, enabled: boolean, rule_type: RuleType, pattern: string, action: RuleAction, description: string | null, sort_order: number, };
+
+export type RoutingSettings = { mode: RoutingMode, cn_direct: boolean, private_direct: boolean, ads_block: boolean, custom_rules: Array<RuleItem>, default_outbound: string, };
+
+export type DnsStrategy = "prefer_ipv4" | "prefer_ipv6" | "ipv4_only" | "ipv6_only";
+
+export type DnsSettings = { enabled: boolean, fake_ip: boolean, fake_ip_range: string, domestic_dns: Array<string>, remote_dns: Array<string>, fallback_dns: Array<string>, strategy: DnsStrategy, disable_ipv6: boolean, };
+

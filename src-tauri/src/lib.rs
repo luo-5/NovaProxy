@@ -94,6 +94,15 @@ pub fn run() {
             commands::encode_node_qr,
             commands::decode_qr_image_base64,
             commands::scan_screen_qr,
+            commands::get_routing_settings,
+            commands::save_routing_settings,
+            commands::list_routing_rules,
+            commands::upsert_routing_rule,
+            commands::delete_routing_rule,
+            commands::reorder_routing_rules,
+            commands::get_dns_settings,
+            commands::save_dns_settings,
+            commands::generate_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NovaProxy application");

@@ -2,7 +2,7 @@
 //! Thin bridge between frontend requests and backend services.
 
 use crate::core::{default_minimal_singbox_config, CoreManager, CoreStartRequest, CoreStatusInfo};
-use crate::model::{ProxyNode, Subscription};
+use crate::model::{CoreType, DnsSettings, ProxyNode, RoutingSettings, RuleItem, Subscription};
 use crate::monitor::CoreLogEntry;
 use crate::parser::base64::decode_base64_permissive;
 use crate::parser::qrcode::{
@@ -213,4 +213,96 @@ pub fn decode_qr_image_base64(image_base64: String) -> Result<Vec<String>, Strin
 #[tauri::command]
 pub fn scan_screen_qr() -> Result<Vec<String>, String> {
     decode_qr_from_screen().map_err(|e| e.to_string())
+}
+
+// ==================== Phase P3: Routing, DNS & Config Generation ====================
+
+#[tauri::command]
+pub fn get_routing_settings(state: State<'_, AppState>) -> Result<RoutingSettings, String> {
+    state.db.get_routing_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_routing_settings(
+    state: State<'_, AppState>,
+    settings: RoutingSettings,
+) -> Result<RoutingSettings, String> {
+    state
+        .db
+        .save_routing_settings(&settings)
+        .map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn list_routing_rules(state: State<'_, AppState>) -> Result<Vec<RuleItem>, String> {
+    state.db.list_routing_rules().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn upsert_routing_rule(state: State<'_, AppState>, rule: RuleItem) -> Result<RuleItem, String> {
+    state
+        .db
+        .upsert_routing_rule(&rule)
+        .map_err(|e| e.to_string())?;
+    Ok(rule)
+}
+
+#[tauri::command]
+pub fn delete_routing_rule(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    state.db.delete_routing_rule(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reorder_routing_rules(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    state
+        .db
+        .reorder_routing_rules(&ids)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_dns_settings(state: State<'_, AppState>) -> Result<DnsSettings, String> {
+    state.db.get_dns_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_dns_settings(
+    state: State<'_, AppState>,
+    settings: DnsSettings,
+) -> Result<DnsSettings, String> {
+    state
+        .db
+        .save_dns_settings(&settings)
+        .map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn generate_config(
+    state: State<'_, AppState>,
+    core_type: Option<CoreType>,
+    active_node_id: Option<String>,
+) -> Result<String, String> {
+    let app_settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+    let core = core_type
+        .or(app_settings.preferred_core)
+        .unwrap_or(CoreType::SingBox);
+    let nodes = state.db.list_nodes().map_err(|e| e.to_string())?;
+    let groups = state.db.list_groups().map_err(|e| e.to_string())?;
+    let dns = state.db.get_dns_settings().map_err(|e| e.to_string())?;
+    let routing = state.db.get_routing_settings().map_err(|e| e.to_string())?;
+
+    crate::generator::generate_core_config(
+        core,
+        &nodes,
+        &groups,
+        &app_settings,
+        &dns,
+        &routing,
+        active_node_id
+            .as_deref()
+            .or(app_settings.active_node_id.as_deref()),
+    )
+    .map_err(|e| e.to_string())
 }

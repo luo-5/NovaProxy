@@ -1,4 +1,7 @@
-use crate::model::{AppSettings, GroupType, LatencyRecord, NodeGroup, ProxyNode, Subscription};
+use crate::model::{
+    AppSettings, DnsSettings, GroupType, LatencyRecord, NodeGroup, ProxyNode, RoutingSettings,
+    RuleAction, RuleItem, RuleType, Subscription,
+};
 use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -7,7 +10,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 const MIGRATION_001: &str = include_str!("migrations/001_initial.sql");
+const MIGRATION_002: &str = include_str!("migrations/002_routing.sql");
 const APP_SETTINGS_KEY: &str = "app_settings";
+const ROUTING_SETTINGS_KEY: &str = "routing_settings";
+const DNS_SETTINGS_KEY: &str = "dns_settings";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -29,11 +35,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "001_initial",
-    sql: MIGRATION_001,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "001_initial",
+        sql: MIGRATION_001,
+    },
+    Migration {
+        version: 2,
+        name: "002_routing",
+        sql: MIGRATION_002,
+    },
+];
 
 /// Thread-safe SQLite storage manager
 #[derive(Clone)]
@@ -629,6 +642,168 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // ==================== Routing Rules CRUD ====================
+
+    pub fn upsert_routing_rule(&self, rule: &RuleItem) -> StorageResult<()> {
+        let (action_str, action_target) = match &rule.action {
+            RuleAction::Proxy => ("proxy", None),
+            RuleAction::Direct => ("direct", None),
+            RuleAction::Block => ("block", None),
+            RuleAction::Tag(t) => ("tag", Some(t.clone())),
+        };
+
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO routing_rules (
+                id, enabled, rule_type, pattern, action, action_target, description, sort_order
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+                enabled = excluded.enabled,
+                rule_type = excluded.rule_type,
+                pattern = excluded.pattern,
+                action = excluded.action,
+                action_target = excluded.action_target,
+                description = excluded.description,
+                sort_order = excluded.sort_order",
+            params![
+                rule.id,
+                rule.enabled as i32,
+                rule.rule_type.as_str(),
+                rule.pattern,
+                action_str,
+                action_target,
+                rule.description,
+                rule.sort_order,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_routing_rules(&self) -> StorageResult<Vec<RuleItem>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, enabled, rule_type, pattern, action, action_target, description, sort_order
+             FROM routing_rules ORDER BY sort_order ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let enabled_int: i32 = row.get(1)?;
+            let rule_type_str: String = row.get(2)?;
+            let action_str: String = row.get(4)?;
+            let action_target: Option<String> = row.get(5)?;
+
+            let action = match action_str.as_str() {
+                "direct" => RuleAction::Direct,
+                "block" | "reject" => RuleAction::Block,
+                "tag" => RuleAction::Tag(action_target.unwrap_or_default()),
+                _ => RuleAction::Proxy,
+            };
+
+            Ok(RuleItem {
+                id: row.get(0)?,
+                enabled: enabled_int != 0,
+                rule_type: RuleType::from_str_lossy(&rule_type_str),
+                pattern: row.get(3)?,
+                action,
+                description: row.get(6)?,
+                sort_order: row.get(7)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn delete_routing_rule(&self, id: &str) -> StorageResult<bool> {
+        let conn = self.conn.lock();
+        let affected = conn.execute("DELETE FROM routing_rules WHERE id = ?1", params![id])?;
+        Ok(affected > 0)
+    }
+
+    pub fn reorder_routing_rules(&self, ids: &[String]) -> StorageResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        for (idx, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE routing_rules SET sort_order = ?1 WHERE id = ?2",
+                params![idx as i32, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ==================== Routing & DNS Settings ====================
+
+    pub fn get_routing_settings(&self) -> StorageResult<RoutingSettings> {
+        let conn = self.conn.lock();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![ROUTING_SETTINGS_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        drop(conn);
+
+        let mut settings = match raw {
+            Some(json_str) => serde_json::from_str::<RoutingSettings>(&json_str)?,
+            None => RoutingSettings::default(),
+        };
+
+        // Attach custom rules from dedicated table
+        settings.custom_rules = self.list_routing_rules()?;
+        Ok(settings)
+    }
+
+    pub fn save_routing_settings(&self, settings: &RoutingSettings) -> StorageResult<()> {
+        let json_str = serde_json::to_string(settings)?;
+        let now = Utc::now().timestamp();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO settings (key, value_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at",
+            params![ROUTING_SETTINGS_KEY, json_str, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_dns_settings(&self) -> StorageResult<DnsSettings> {
+        let conn = self.conn.lock();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![DNS_SETTINGS_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        match raw {
+            Some(json_str) => Ok(serde_json::from_str(&json_str)?),
+            None => Ok(DnsSettings::default()),
+        }
+    }
+
+    pub fn save_dns_settings(&self, settings: &DnsSettings) -> StorageResult<()> {
+        let json_str = serde_json::to_string(settings)?;
+        let now = Utc::now().timestamp();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO settings (key, value_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at",
+            params![DNS_SETTINGS_KEY, json_str, now],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -682,7 +857,7 @@ mod tests {
     #[test]
     fn test_migrations_and_settings_crud() {
         let db = Database::open_in_memory().expect("open in-memory db");
-        assert_eq!(db.applied_migrations().unwrap(), vec![1]);
+        assert_eq!(db.applied_migrations().unwrap(), vec![1, 2]);
 
         let default_settings = db.get_app_settings().unwrap();
         assert_eq!(default_settings.mixed_port, 7890);
@@ -698,6 +873,58 @@ mod tests {
         assert_eq!(loaded.mixed_port, 10808);
         assert_eq!(loaded.preferred_core, Some(CoreType::SingBox));
         assert_eq!(loaded.routing_mode, RoutingMode::Global);
+
+        // Test Routing Rules CRUD
+        let rule1 = RuleItem {
+            id: "r1".to_string(),
+            enabled: true,
+            rule_type: RuleType::DomainSuffix,
+            pattern: "google.com".to_string(),
+            action: RuleAction::Proxy,
+            description: Some("Google Proxy".to_string()),
+            sort_order: 0,
+        };
+        let rule2 = RuleItem {
+            id: "r2".to_string(),
+            enabled: true,
+            rule_type: RuleType::IpCidr,
+            pattern: "192.168.1.0/24".to_string(),
+            action: RuleAction::Direct,
+            description: None,
+            sort_order: 1,
+        };
+        db.upsert_routing_rule(&rule1).unwrap();
+        db.upsert_routing_rule(&rule2).unwrap();
+
+        let rules = db.list_routing_rules().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].pattern, "google.com");
+        assert_eq!(rules[1].action, RuleAction::Direct);
+
+        db.reorder_routing_rules(&["r2".to_string(), "r1".to_string()])
+            .unwrap();
+        let reordered = db.list_routing_rules().unwrap();
+        assert_eq!(reordered[0].id, "r2");
+        assert_eq!(reordered[1].id, "r1");
+
+        assert!(db.delete_routing_rule("r1").unwrap());
+        assert_eq!(db.list_routing_rules().unwrap().len(), 1);
+
+        // Test Routing Settings & DNS Settings
+        let mut r_settings = db.get_routing_settings().unwrap();
+        assert!(r_settings.cn_direct);
+        r_settings.cn_direct = false;
+        db.save_routing_settings(&r_settings).unwrap();
+        let loaded_r = db.get_routing_settings().unwrap();
+        assert!(!loaded_r.cn_direct);
+        assert_eq!(loaded_r.custom_rules.len(), 1);
+
+        let mut dns_settings = db.get_dns_settings().unwrap();
+        assert!(dns_settings.fake_ip);
+        dns_settings.fake_ip = false;
+        db.save_dns_settings(&dns_settings).unwrap();
+        let loaded_dns = db.get_dns_settings().unwrap();
+        assert!(!loaded_dns.fake_ip);
     }
 
     #[test]

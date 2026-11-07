@@ -2,10 +2,12 @@
 //! Includes ProxyNode, Subscription, Settings, and Routing rules.
 
 pub mod node;
+pub mod routing;
 pub mod settings;
 pub mod subscription;
 
 pub use node::*;
+pub use routing::*;
 pub use settings::*;
 pub use subscription::*;
 
@@ -67,6 +69,12 @@ pub fn generate_typescript_bindings() -> String {
         SubscriptionFormat::decl(),
         SubscriptionParseReport::decl(),
         SubscriptionUserInfo::decl(),
+        RuleType::decl(),
+        RuleAction::decl(),
+        RuleItem::decl(),
+        RoutingSettings::decl(),
+        DnsStrategy::decl(),
+        DnsSettings::decl(),
     ];
 
     let mut out = String::from(
