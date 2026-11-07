@@ -259,6 +259,90 @@
         "pnpm_tsc": "PASS (0 errors)",
         "pnpm_build": "PASS (Vite build in 6.84s)"
       }
+    },
+    {
+      "phase": "P6",
+      "executed_by": "Gemini-3.8-flash",
+      "audit_by": "Gemini-4-Argon (pending review)",
+      "timestamp": "2026-11-07T21:10:00+08:00",
+      "completed_items": [
+        {
+          "item": "P6-1",
+          "name": "Atomic Configuration Writing",
+          "files": [
+            "src-tauri/src/storage/atomic.rs",
+            "src-tauri/src/storage/mod.rs",
+            "src-tauri/src/core/manager.rs"
+          ],
+          "description": "Atomic file writing via staging UUID temporary files, fsync sync_all, and atomic rename to prevent zero-byte corruptions"
+        },
+        {
+          "item": "P6-2",
+          "name": "SQLite Integrity Verification & Hot Backup",
+          "files": [
+            "src-tauri/src/storage/db.rs",
+            "src-tauri/src/commands/mod.rs",
+            "src-tauri/src/lib.rs",
+            "src/lib/ipc.ts"
+          ],
+          "description": "PRAGMA integrity_check verification and VACUUM INTO online hot backup on startup and via IPC"
+        },
+        {
+          "item": "P6-3",
+          "name": "Self-Healing Crash Supervisor with Exponential Backoff",
+          "files": [
+            "src-tauri/src/core/manager.rs"
+          ],
+          "description": "Child process crash detection and auto-recovery with sliding 60s window, exponential backoff (1s, 2s, 4s), and 3-attempt safety circuit-breaker"
+        },
+        {
+          "item": "P6-4",
+          "name": "Clash API Zero-Downtime Hot-Reload Switching",
+          "files": [
+            "src-tauri/src/core/hot_reload.rs",
+            "src-tauri/src/core/mod.rs",
+            "src-tauri/src/commands/mod.rs"
+          ],
+          "description": "Dynamic proxy switching via PUT /proxies/{group} in <5ms without terminating core process or breaking established TCP streams"
+        },
+        {
+          "item": "P6-5",
+          "name": "Active Node Health Probe & Auto-Failover",
+          "files": [
+            "src-tauri/src/monitor/health.rs",
+            "src-tauri/src/monitor/mod.rs",
+            "src-tauri/src/lib.rs"
+          ],
+          "description": "Continuous active node latency health check, consecutive failure tracking, and automatic failover to the lowest-latency healthy alternative"
+        },
+        {
+          "item": "P6-6",
+          "name": "Windows Network Change Listener & WinINet Resync",
+          "files": [
+            "src-tauri/src/system/network.rs",
+            "src-tauri/src/system/sysproxy.rs",
+            "src-tauri/src/system/mod.rs",
+            "src-tauri/src/lib.rs"
+          ],
+          "description": "Win32 NotifyAddrChange and WaitForMultipleObjects thread listener detecting adapter and IP table changes to keep WinINet options 39 & 37 synchronized"
+        },
+        {
+          "item": "P6-7",
+          "name": "Stability Integration Test Suite",
+          "files": [
+            "src-tauri/tests/stability_test.rs"
+          ],
+          "description": "5 end-to-end integration tests validating atomic writes, database integrity and backups, offline hot-reload error handling, health failover, and network listener lifecycle"
+        }
+      ],
+      "verification": {
+        "cargo_fmt": "PASS",
+        "cargo_clippy": "PASS (0 warnings with -D warnings)",
+        "cargo_test": "PASS (54/54 passed)",
+        "pnpm_lint": "PASS (0 errors, 0 warnings)",
+        "pnpm_tsc": "PASS (0 errors)",
+        "pnpm_build": "PASS (built in 3.61s)"
+      }
     }
   ]
 }

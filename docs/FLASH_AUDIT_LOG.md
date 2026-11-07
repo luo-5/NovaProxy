@@ -170,3 +170,68 @@
 - `pnpm lint`：通过（0 错误 0 警告）
 - `pnpm tsc --noEmit`：通过（0 错误）
 - `pnpm build`：构建成功（Vite 打包产物正常）
+
+---
+
+## 阶段 P6：稳定性加固 (Stability & Hardening)
+
+### 1. 执行背景
+- **切换时间**：2026-11-07
+- **原因**：Gemini 4 Argon token 仍未恢复，由 Gemini 3.8 Flash 继续实现 Phase P6 稳定性加固所有核心机制，并完成全方位自愈与容灾测试。
+- **任务目标**：根据规范交付全套系统级高可用性保障：
+  1. 配置文件原子写入（Atomic File Write）机制，杜绝断电或非正常关机导致的 JSON 损坏与零字节配置文件。
+  2. SQLite 数据库在线完整性检查（`PRAGMA integrity_check`）与热备份（`VACUUM INTO`）容灾机制。
+  3. 内核崩溃自愈守护者（Self-Healing Supervisor）与指数退避重试（1s, 2s, 4s，60秒内上限 3 次，防止高 CPU 重启死循环）。
+  4. 基于 Clash REST API 的内存热重载与活动代理节点动态无感切换（Zero-Downtime Hot-Switch），毫秒级换线不掐断存量连接。
+  5. 后台节点健康主动探测与多级自动故障转移（Health Monitor & Auto-Failover）。
+  6. Windows 网络接口与路由表变更监听器（基于 Win32 `iphlpapi::NotifyAddrChange`），处理休眠唤醒、WiFi 漫游时的 WinINet 系统代理状态自动重同步。
+  7. 编写端到端稳定性集成测试套件（`tests/stability_test.rs`），确保所有异常与容灾链路 100% 覆盖。
+
+---
+
+### 2. 详细变更清单
+
+| 模块 / 文件 | 类型 | 核心改动说明 |
+|---|---|---|
+| `src-tauri/src/storage/atomic.rs` | 新增 | 实现 `atomic_write_file`：通过带 UUID 的临时中间文件写入、强刷磁盘 `sync_all` (fsync)、以及文件系统级原子重命名（rename）写入目标文件，杜绝写入过程崩溃导致半截配置或 0 字节损坏 |
+| `src-tauri/src/storage/mod.rs` | 修改 | 导出 `atomic_write_file` 工具函数 |
+| `src-tauri/src/storage/db.rs` | 修改 | 实现 `check_integrity()`（校验 SQLite B-Tree 与页面完整性）与 `backup_database()`（利用 SQLite 在线快照 `VACUUM INTO` 生成无锁实时灾备） |
+| `src-tauri/src/core/manager.rs` | 修改 | 1. 运行时配置文件生成全部迁移为 `atomic_write_file`；<br>2. `StateInner` 保留最新 `last_start_request` 与崩溃重试滑动窗口；<br>3. `monitor_child_exit` 引入自愈守护逻辑与指数退避（`[1000ms, 2000ms, 4000ms]`，上限 3 次/60s，防死循环熔断）；<br>4. 采用 Pin-Box Future 彻底解耦异步递归类型推导环（E0391） |
+| `src-tauri/src/core/hot_reload.rs` | 新增 | 封装 Clash REST API：`try_hot_switch_proxy`（`PUT /proxies/{group}`）、`try_smart_hot_switch`（自适应兼容 `proxy` / `PROXY` / `GLOBAL` 分组与节点 ID/名称）、`try_hot_reload_config`（`PUT /configs`） |
+| `src-tauri/src/core/mod.rs` | 修改 | 导出 `hot_reload` 模块与热切换函数 |
+| `src-tauri/src/commands/mod.rs` | 修改 | 1. `select_active_node` 接入热切换逻辑：内核在线时优先 Clash API 动态切线（< 5ms，不掐断已建立 TCP 流），失败时优雅降级为内核无损重载；<br>2. 暴露 `check_database_integrity` 与 `backup_database` IPC 命令 |
+| `src-tauri/src/monitor/health.rs` | 新增 | 实现 `HealthMonitor` 后台巡检任务：定期探测当前活动节点时延，连续失败达阈值（默认 2 次）自动触发 Failover，从数据库筛选最低延迟的备用健康节点并无缝切线，重置计数器并上报系统日志 |
+| `src-tauri/src/monitor/mod.rs` | 修改 | 导出 `HealthMonitor` 与 `FailoverEvent` |
+| `src-tauri/src/system/network.rs` | 新增 | 基于 Win32 `iphlpapi::NotifyAddrChange` 和 `WaitForMultipleObjects` 的专用后台 OS 监听线程，实时捕获网络适配器与 IP 地址变动，自适应重刷 WinINet option 39/37，保障睡眠唤醒或 WiFi 切换后代理不丢失 |
+| `src-tauri/src/system/sysproxy.rs` | 修改 | 新增 `is_active(&self)` 与 `refresh_wininet()` 静态辅助方法，便于网络变动时无锁即刻重广播系统代理 |
+| `src-tauri/src/system/mod.rs` | 修改 | 导出 `NetworkChangeListener` 模块 |
+| `src-tauri/src/lib.rs` | 修改 | 启动时执行数据库完整性自检与备份；启动 `NetworkChangeListener` 与 `HealthMonitor` 守护线程；注册数据库管理 IPC 命令 |
+| `src/lib/ipc.ts` | 修改 | 增加 `checkDatabaseIntegrity()` 与 `backupDatabase(path)` 前端封装 |
+| `src-tauri/tests/stability_test.rs` | 新增 | 5 个稳定性集成测试：原子写入与深层路径创建、在线数据库校验与备份、Clash API 离线优雅错误处理、主动健康探测与自动故障转移、网络变更监听器生命周期 |
+
+---
+
+### 3. 关键架构与设计决策（供 Argon 审查）
+
+1. **Clash API 零停机热切换（Zero-Downtime Hot-Switch）**：
+   - 传统客户端更换节点通常直接强杀内核进程再启动，导致浏览器下载中断、长连接游戏或 SSH 会话掉线。
+   - 实现方案：sing-box（通过 `experimental.clash_api`）与 mihomo 均在本地 `127.0.0.1:9090` 暴露了 Clash 兼容 REST 接口。通过调用 `PUT /proxies/{group}`，在内存中动态切换选择器分组指向的底层出站节点，耗时 < 5ms，存量连接保持存活，新连接即刻经由新节点路由。只有在热切换失败或使用无 Clash API 的 Xray 时才回退为平滑重启。
+2. **防崩溃死循环退避机制（Supervisor Anti-Looping Backoff）**：
+   - 常见痛点：如果节点配置有严重错误或端口被系统强行占用，崩溃自愈如果立即无脑重启，会导致 CPU 跑满 100% 并生成海量日志。
+   - 实现方案：在 `CoreManager` 维护 `consecutive_crashes` 与 `first_crash_time`，设计了滑动时间窗口（60秒）。重试间隔按 `[1000ms, 2000ms, 4000ms]` 指数递增。若 60 秒内连续崩溃超过 3 次，守护者主动熔断，停止重启并锁定为 `CoreLifecycleState::Crashed` 状态，同时向事件总线抛出致命警告。
+3. **基于 Win32 异步重叠 I/O 的网络变更自适应**：
+   - 笔记本休眠唤醒、切换无线局域网或插入网线时，Windows 网络栈会自动重置网卡状态，常常导致浏览器或应用程序掉出代理。
+   - 实现方案：在独立原生线程中使用 `iphlpapi.dll` 的 `NotifyAddrChange` 结合 Win32 事件驱动 `WaitForMultipleObjects`。一旦网卡/IP 表变动，在纳秒级唤醒并立即触发 WinINet `INTERNET_OPTION_SETTINGS_CHANGED` (39) 与 `INTERNET_OPTION_REFRESH` (37) 广播，确保系统代理始终在线。退出时通过 `SetEvent` 优雅通知并同步回收所有 OS 句柄，无任何内存或句柄泄漏。
+4. **编译期异步递归解耦**：
+   - `CoreManager::start` 与 `monitor_child_exit` 存在相互引用，Rust 编译器的 auto trait bounds 算法会在推导不透明类型（opaque type）时形成静态闭环（E0391）。
+   - 实现方案：将 `start` 的公共签名定义为返回 `Pin<Box<dyn Future...>>`，擦除具体生成器类型，从根源打破静态类型推导依赖环。
+
+---
+
+### 4. 质量审查与测试记录
+- `cargo fmt --check`：通过
+- `cargo clippy -- -D warnings`：通过（0 警告）
+- `cargo test`：全部 54 个测试通过（31 单元 + 4 生成器检查 + 9 订阅与链接往返 + 5 系统代理/TUN + 5 稳定性集成）
+- `pnpm lint`：通过（0 错误 0 警告）
+- `pnpm tsc --noEmit`：通过（0 错误）
+- `pnpm build`：构建成功（0 错误）

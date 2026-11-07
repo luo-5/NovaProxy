@@ -133,6 +133,24 @@ impl Database {
         Ok(versions)
     }
 
+    /// Runs SQLite PRAGMA integrity_check to detect database corruption
+    pub fn check_integrity(&self) -> StorageResult<bool> {
+        let conn = self.conn.lock();
+        let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        Ok(result.eq_ignore_ascii_case("ok"))
+    }
+
+    /// Backs up the SQLite database to a snapshot file using VACUUM INTO
+    pub fn backup_database(&self, backup_path: impl AsRef<Path>) -> StorageResult<()> {
+        let path_str = backup_path.as_ref().to_string_lossy().to_string();
+        if backup_path.as_ref().exists() {
+            let _ = std::fs::remove_file(backup_path.as_ref());
+        }
+        let conn = self.conn.lock();
+        conn.execute("VACUUM INTO ?1", params![path_str])?;
+        Ok(())
+    }
+
     // ==================== Subscriptions CRUD ====================
 
     pub fn upsert_subscription(&self, sub: &Subscription) -> StorageResult<()> {

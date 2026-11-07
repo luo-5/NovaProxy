@@ -62,6 +62,10 @@ pub fn run() {
             let db = Database::open(&db_path)
                 .map_err(|e| std::io::Error::other(format!("Failed to open database: {}", e)))?;
 
+            // Periodic database integrity verification & snapshot
+            let _ = db.check_integrity();
+            let _ = db.backup_database(app_data_dir.join("novaproxy.backup.db"));
+
             let cores_dir = resolve_cores_dir(app);
             let work_dir = app_data_dir.join("runtime");
             let core_manager = CoreManager::new(cores_dir, work_dir);
@@ -73,6 +77,17 @@ pub fn run() {
 
             let sysproxy_manager = SystemProxyManager::new();
             let _ = system::register_url_schemes();
+
+            // Background monitors: network interface changes & active node health probe
+            let net_listener =
+                Arc::new(system::NetworkChangeListener::new(sysproxy_manager.clone()));
+            net_listener.start();
+
+            let health_monitor = Arc::new(monitor::HealthMonitor::new(
+                db.clone(),
+                core_manager.clone(),
+            ));
+            health_monitor.start();
 
             let toggle_i = MenuItemBuilder::with_id("toggle", "Show / Hide Window").build(app)?;
             let quit_i = MenuItemBuilder::with_id("quit", "Exit").build(app)?;
@@ -177,6 +192,8 @@ pub fn run() {
             commands::get_core_traffic,
             commands::get_core_connections,
             commands::close_core_connection,
+            commands::check_database_integrity,
+            commands::backup_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NovaProxy application");

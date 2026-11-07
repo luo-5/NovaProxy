@@ -564,9 +564,31 @@ pub async fn select_active_node(state: State<'_, AppState>, id: String) -> Resul
         .save_app_settings(&settings)
         .map_err(|e| e.to_string())?;
 
-    // If core is running, restart to immediately route via the newly selected active node
+    // If core is running, attempt zero-downtime hot switch via Clash API
     let status = state.core_manager.status();
     if matches!(status.lifecycle, CoreLifecycleState::Running) {
+        if let Ok(Some(node)) = state.db.get_node(&id) {
+            let hot_res = crate::core::try_smart_hot_switch(
+                settings.clash_api_port,
+                settings.clash_api_secret.as_deref(),
+                &node.id,
+                &node.name,
+            )
+            .await;
+
+            if hot_res.is_ok() {
+                tracing::info!(
+                    "Successfully hot-switched active proxy node to {}",
+                    node.name
+                );
+                return Ok(());
+            }
+            tracing::debug!(
+                "Hot-switch not supported or failed ({:?}), falling back to core restart",
+                hot_res
+            );
+        }
+
         let core = status
             .active_core
             .or(settings.preferred_core)
@@ -703,4 +725,19 @@ pub async fn close_core_connection(
     }
     let _ = req.send().await;
     Ok(())
+}
+
+// ==================== Phase P6: Database Integrity & Backup ====================
+
+#[tauri::command]
+pub fn check_database_integrity(state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.check_integrity().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn backup_database(state: State<'_, AppState>, target_path: String) -> Result<(), String> {
+    state
+        .db
+        .backup_database(&target_path)
+        .map_err(|e| e.to_string())
 }

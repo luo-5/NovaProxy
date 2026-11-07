@@ -330,3 +330,11 @@ export async function getCoreConnections(): Promise<CoreConnectionsReport> {
 export async function closeCoreConnection(id?: string): Promise<void> {
   return await invoke<void>("close_core_connection", { id });
 }
+
+export async function checkDatabaseIntegrity(): Promise<boolean> {
+  return await invoke<boolean>("check_database_integrity");
+}
+
+export async function backupDatabase(targetPath: string): Promise<void> {
+  return await invoke<void>("backup_database", { targetPath });
+}

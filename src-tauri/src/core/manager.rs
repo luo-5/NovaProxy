@@ -137,6 +137,10 @@ struct StateInner {
     status: CoreStatusInfo,
     stopping_intentionally: bool,
     active_instance_id: u64,
+    last_start_request: Option<CoreStartRequest>,
+    crash_count: u32,
+    last_crash_at: Option<i64>,
+    auto_heal: bool,
 }
 
 /// Central manager for proxy core processes, logs, and capabilities
@@ -165,6 +169,10 @@ impl CoreManager {
                 status: CoreStatusInfo::default(),
                 stopping_intentionally: false,
                 active_instance_id: 0,
+                last_start_request: None,
+                crash_count: 0,
+                last_crash_at: None,
+                auto_heal: true,
             })),
             child_holder: Arc::new(AsyncMutex::new(None)),
             instance_seq: Arc::new(AtomicU64::new(1)),
@@ -172,6 +180,20 @@ impl CoreManager {
             capabilities: CoreCapabilitiesRegistry::new(),
             event_sink: Arc::new(Mutex::new(Arc::new(NoopEventSink))),
         }
+    }
+
+    pub fn set_auto_heal(&self, enabled: bool) {
+        self.state.lock().auto_heal = enabled;
+    }
+
+    pub fn auto_heal(&self) -> bool {
+        self.state.lock().auto_heal
+    }
+
+    pub fn reset_crash_count(&self) {
+        let mut guard = self.state.lock();
+        guard.crash_count = 0;
+        guard.last_crash_at = None;
     }
 
     pub fn set_event_sink(&self, sink: Arc<dyn CoreEventSink>) {
@@ -248,7 +270,16 @@ impl CoreManager {
 
     /// Starts the proxy core with pre-flight configuration check, automatic port conflict resolution,
     /// Windows Job Object binding, and real-time stdout/stderr capture.
-    pub async fn start(&self, req: CoreStartRequest) -> Result<CoreStatusInfo, ManagerError> {
+    pub fn start(
+        &self,
+        req: CoreStartRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CoreStatusInfo, ManagerError>> + Send + '_>,
+    > {
+        Box::pin(self.start_inner(req))
+    }
+
+    async fn start_inner(&self, req: CoreStartRequest) -> Result<CoreStatusInfo, ManagerError> {
         // If already running or starting, stop cleanly first
         {
             let current = self.state.lock().status.lifecycle.clone();
@@ -279,6 +310,7 @@ impl CoreManager {
             guard.status.actual_mixed_port = None;
             guard.status.port_reassigned = false;
             guard.stopping_intentionally = false;
+            guard.last_start_request = Some(req.clone());
             let snap = guard.status.clone();
             drop(guard);
             self.emit_status(&snap);
@@ -350,7 +382,7 @@ impl CoreManager {
         let config_path = self
             .work_dir
             .join(format!("runtime_{}.{}", core.as_str(), ext));
-        std::fs::write(&config_path, port_res.config_content.as_bytes())?;
+        crate::storage::atomic_write_file(&config_path, port_res.config_content.as_bytes())?;
 
         // 3. Run pre-flight `check` command (`sing-box check`, `mihomo -t`, `xray run -test`)
         let binary_path = self.binary_path(core);
@@ -508,12 +540,12 @@ impl CoreManager {
                         break;
                     }
 
-                    if guard.stopping_intentionally
+                    let (should_retry, retry_req, backoff_ms, attempt) = if guard
+                        .stopping_intentionally
                         || matches!(
                             guard.status.lifecycle,
                             CoreLifecycleState::Stopping | CoreLifecycleState::Stopped
-                        )
-                    {
+                        ) {
                         let _ = guard
                             .status
                             .lifecycle
@@ -522,7 +554,21 @@ impl CoreManager {
                         let snap = guard.status.clone();
                         drop(guard);
                         self.emit_status(&snap);
+                        (false, None, 0, 0)
                     } else {
+                        let now = Utc::now().timestamp_millis();
+                        if let Some(last) = guard.last_crash_at {
+                            if now - last > 60_000 {
+                                guard.crash_count = 0;
+                            }
+                        }
+                        guard.crash_count += 1;
+                        guard.last_crash_at = Some(now);
+
+                        let count = guard.crash_count;
+                        let auto_heal = guard.auto_heal;
+                        let req = guard.last_start_request.clone();
+
                         let reason =
                             format!("Core {} exited unexpectedly (exit code: {:?})", core, code);
                         let _ = guard
@@ -537,6 +583,80 @@ impl CoreManager {
                         drop(guard);
                         self.emit_log(Some(core), LogStream::System, LogLevel::Error, reason);
                         self.emit_status(&snap);
+
+                        if auto_heal && count <= 3 && req.is_some() {
+                            let backoff = match count {
+                                1 => 1000,
+                                2 => 2000,
+                                _ => 4000,
+                            };
+                            (true, req, backoff, count)
+                        } else {
+                            if count > 3 {
+                                self.emit_log(
+                                    Some(core),
+                                    LogStream::System,
+                                    LogLevel::Error,
+                                    format!(
+                                        "[Supervisor] Core {} crashed {} times in 60s. Auto-recovery suspended.",
+                                        core, count
+                                    ),
+                                );
+                            }
+                            (false, None, 0, count)
+                        }
+                    };
+
+                    if should_retry {
+                        if let Some(req) = retry_req {
+                            self.emit_log(
+                                Some(core),
+                                LogStream::System,
+                                LogLevel::Warn,
+                                format!(
+                                    "[Supervisor] Auto-recovering core {} in {}ms (attempt {}/3)...",
+                                    core, backoff_ms, attempt
+                                ),
+                            );
+                            let mgr = self.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                let stopping = mgr.state.lock().stopping_intentionally;
+                                if !stopping {
+                                    let start_fut: std::pin::Pin<
+                                        Box<
+                                            dyn std::future::Future<
+                                                    Output = Result<CoreStatusInfo, ManagerError>,
+                                                > + Send,
+                                        >,
+                                    > = Box::pin(mgr.start(req));
+                                    match start_fut.await {
+                                        Ok(_) => {
+                                            mgr.emit_log(
+                                                Some(core),
+                                                LogStream::System,
+                                                LogLevel::Info,
+                                                format!(
+                                                    "[Supervisor] Core {} successfully auto-recovered and running.",
+                                                    core
+                                                ),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            mgr.emit_log(
+                                                Some(core),
+                                                LogStream::System,
+                                                LogLevel::Error,
+                                                format!(
+                                                    "[Supervisor] Auto-recovery attempt {} failed: {}",
+                                                    attempt, e
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                        }
                     }
                     break;
                 }
@@ -577,6 +697,8 @@ impl CoreManager {
                 }
                 _ => {
                     guard.stopping_intentionally = true;
+                    guard.crash_count = 0;
+                    guard.last_crash_at = None;
                     guard
                         .status
                         .lifecycle

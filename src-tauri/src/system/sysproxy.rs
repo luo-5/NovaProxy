@@ -129,6 +129,27 @@ impl SystemProxyManager {
         }
     }
 
+    pub fn is_active(&self) -> bool {
+        self.is_active.load(Ordering::SeqCst)
+    }
+
+    /// Triggers WinINet cache and settings refresh notifications
+    pub fn refresh_wininet() -> Result<(), SystemError> {
+        #[cfg(target_os = "windows")]
+        {
+            use win32::*;
+            unsafe {
+                let ok1 =
+                    InternetSetOptionW(null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, null_mut(), 0);
+                let ok2 = InternetSetOptionW(null_mut(), INTERNET_OPTION_REFRESH, null_mut(), 0);
+                if ok1 == 0 || ok2 == 0 {
+                    return Err(SystemError::WinINet(GetLastError()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reads the current system proxy configuration
     pub fn query_current() -> Result<SysProxySnapshot, SystemError> {
         #[cfg(target_os = "windows")]
