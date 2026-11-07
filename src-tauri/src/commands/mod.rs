@@ -1,8 +1,13 @@
 //! Tauri IPC commands
 //! Thin bridge between frontend requests and backend services.
 
-use crate::core::{default_minimal_singbox_config, CoreManager, CoreStartRequest, CoreStatusInfo};
-use crate::model::{CoreType, DnsSettings, ProxyNode, RoutingSettings, RuleItem, Subscription};
+use crate::core::{
+    default_minimal_singbox_config, CoreLifecycleState, CoreManager, CoreStartRequest,
+    CoreStatusInfo,
+};
+use crate::model::{
+    AppSettings, CoreType, DnsSettings, ProxyNode, RoutingSettings, RuleItem, Subscription,
+};
 use crate::monitor::CoreLogEntry;
 use crate::parser::base64::decode_base64_permissive;
 use crate::parser::qrcode::{
@@ -40,7 +45,31 @@ pub async fn core_start(
     state: State<'_, AppState>,
     request: Option<CoreStartRequest>,
 ) -> Result<CoreStatusInfo, String> {
-    let req = request.unwrap_or_default();
+    let mut req = request.unwrap_or_default();
+    if req.config_json.is_none() {
+        let app_settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+        let core = req
+            .core_type
+            .or(app_settings.preferred_core)
+            .unwrap_or(CoreType::SingBox);
+        req.core_type = Some(core);
+        let nodes = state.db.list_nodes().map_err(|e| e.to_string())?;
+        let groups = state.db.list_groups().map_err(|e| e.to_string())?;
+        let dns = state.db.get_dns_settings().map_err(|e| e.to_string())?;
+        let routing = state.db.get_routing_settings().map_err(|e| e.to_string())?;
+
+        let generated = crate::generator::generate_core_config(
+            core,
+            &nodes,
+            &groups,
+            &app_settings,
+            &dns,
+            &routing,
+            app_settings.active_node_id.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        req.config_json = Some(generated);
+    }
     state
         .core_manager
         .start(req)
@@ -58,7 +87,31 @@ pub async fn core_restart(
     state: State<'_, AppState>,
     request: Option<CoreStartRequest>,
 ) -> Result<CoreStatusInfo, String> {
-    let req = request.unwrap_or_default();
+    let mut req = request.unwrap_or_default();
+    if req.config_json.is_none() {
+        let app_settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+        let core = req
+            .core_type
+            .or(app_settings.preferred_core)
+            .unwrap_or(CoreType::SingBox);
+        req.core_type = Some(core);
+        let nodes = state.db.list_nodes().map_err(|e| e.to_string())?;
+        let groups = state.db.list_groups().map_err(|e| e.to_string())?;
+        let dns = state.db.get_dns_settings().map_err(|e| e.to_string())?;
+        let routing = state.db.get_routing_settings().map_err(|e| e.to_string())?;
+
+        let generated = crate::generator::generate_core_config(
+            core,
+            &nodes,
+            &groups,
+            &app_settings,
+            &dns,
+            &routing,
+            app_settings.active_node_id.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        req.config_json = Some(generated);
+    }
     state
         .core_manager
         .restart(req)
@@ -404,4 +457,250 @@ pub async fn handle_deep_link_url(
         .map_err(|e| e.to_string())?;
 
     Ok(Some(sub))
+}
+
+// ==================== Phase P5: App Settings, Latency & Traffic ====================
+
+#[tauri::command]
+pub fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    state.db.get_app_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_app_settings(
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    state
+        .db
+        .save_app_settings(&settings)
+        .map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+async fn tcp_ping(
+    host: &str,
+    port: u16,
+    timeout_duration: std::time::Duration,
+) -> Result<i64, String> {
+    let start = std::time::Instant::now();
+    let addr = format!("{}:{}", host, port);
+    let connect_fut = tokio::net::TcpStream::connect(&addr);
+    match tokio::time::timeout(timeout_duration, connect_fut).await {
+        Ok(Ok(_)) => Ok(start.elapsed().as_millis() as i64),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("Timeout".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn test_node_latency(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<i64>, String> {
+    let node = state
+        .db
+        .get_node(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Node not found: {id}"))?;
+
+    let res = tcp_ping(
+        &node.server,
+        node.port,
+        std::time::Duration::from_millis(2500),
+    )
+    .await;
+    let (lat, err) = match res {
+        Ok(ms) => (Some(ms), None),
+        Err(e) => (None, Some(e)),
+    };
+    state
+        .db
+        .record_latency(&id, lat, "tcp", err.as_deref())
+        .map_err(|e| e.to_string())?;
+    Ok(lat)
+}
+
+#[tauri::command]
+pub async fn test_all_nodes_latency(
+    state: State<'_, AppState>,
+) -> Result<Vec<(String, Option<i64>)>, String> {
+    let nodes = state.db.list_nodes().map_err(|e| e.to_string())?;
+    let mut handles = Vec::new();
+
+    for node in nodes {
+        let db = state.db.clone();
+        handles.push(tokio::spawn(async move {
+            let res = tcp_ping(
+                &node.server,
+                node.port,
+                std::time::Duration::from_millis(3000),
+            )
+            .await;
+            let (lat, err) = match res {
+                Ok(ms) => (Some(ms), None),
+                Err(e) => (None, Some(e)),
+            };
+            let _ = db.record_latency(&node.id, lat, "tcp", err.as_deref());
+            (node.id, lat)
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        if let Ok(res) = handle.await {
+            results.push(res);
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn select_active_node(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+    settings.active_node_id = Some(id.clone());
+    state
+        .db
+        .save_app_settings(&settings)
+        .map_err(|e| e.to_string())?;
+
+    // If core is running, restart to immediately route via the newly selected active node
+    let status = state.core_manager.status();
+    if matches!(status.lifecycle, CoreLifecycleState::Running) {
+        let core = status
+            .active_core
+            .or(settings.preferred_core)
+            .unwrap_or(CoreType::SingBox);
+        let nodes = state.db.list_nodes().map_err(|e| e.to_string())?;
+        let groups = state.db.list_groups().map_err(|e| e.to_string())?;
+        let dns = state.db.get_dns_settings().map_err(|e| e.to_string())?;
+        let routing = state.db.get_routing_settings().map_err(|e| e.to_string())?;
+
+        let generated = crate::generator::generate_core_config(
+            core,
+            &nodes,
+            &groups,
+            &settings,
+            &dns,
+            &routing,
+            Some(&id),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let req = CoreStartRequest {
+            core_type: Some(core),
+            config_json: Some(generated),
+            mixed_port: status.requested_port,
+            allow_lan: Some(settings.allow_lan),
+            auto_port_fallback: Some(settings.auto_port_fallback),
+        };
+        let _ = state.core_manager.restart(req).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_core_traffic(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+    let port = settings.clash_api_port;
+    let url = format!("http://127.0.0.1:{}/traffic", port);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_e) => return Ok(serde_json::json!({ "up": 0, "down": 0 })),
+    };
+
+    let mut req = client.get(&url);
+    if let Some(secret) = &settings.clash_api_secret {
+        if !secret.is_empty() {
+            req = req.bearer_auth(secret);
+        }
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let val = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "up": 0, "down": 0 }));
+            Ok(val)
+        }
+        Err(_) => Ok(serde_json::json!({ "up": 0, "down": 0 })),
+    }
+}
+
+#[tauri::command]
+pub async fn get_core_connections(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+    let port = settings.clash_api_port;
+    let url = format!("http://127.0.0.1:{}/connections", port);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(2000))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_e) => {
+            return Ok(serde_json::json!({
+                "downloadTotal": 0,
+                "uploadTotal": 0,
+                "connections": []
+            }))
+        }
+    };
+
+    let mut req = client.get(&url);
+    if let Some(secret) = &settings.clash_api_secret {
+        if !secret.is_empty() {
+            req = req.bearer_auth(secret);
+        }
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let val = resp.json::<serde_json::Value>().await.unwrap_or_else(|_| {
+                serde_json::json!({
+                    "downloadTotal": 0,
+                    "uploadTotal": 0,
+                    "connections": []
+                })
+            });
+            Ok(val)
+        }
+        Err(_) => Ok(serde_json::json!({
+            "downloadTotal": 0,
+            "uploadTotal": 0,
+            "connections": []
+        })),
+    }
+}
+
+#[tauri::command]
+pub async fn close_core_connection(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> Result<(), String> {
+    let settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+    let port = settings.clash_api_port;
+    let url = match &id {
+        Some(cid) => format!("http://127.0.0.1:{}/connections/{}", port, cid),
+        None => format!("http://127.0.0.1:{}/connections", port),
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(2000))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let mut req = client.delete(&url);
+    if let Some(secret) = &settings.clash_api_secret {
+        if !secret.is_empty() {
+            req = req.bearer_auth(secret);
+        }
+    }
+    let _ = req.send().await;
+    Ok(())
 }

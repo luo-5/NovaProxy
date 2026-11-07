@@ -108,3 +108,65 @@
 - `cargo test`：全部 45 个测试通过（27 单元 + 4 生成器检查 + 9 订阅往返 + 5 系统代理/TUN 测试）
 - `pnpm lint`：通过
 - `pnpm tsc --noEmit`：通过
+
+---
+
+## 阶段 P5：完整 UI 实现
+
+### 1. 执行背景
+- **切换时间**：2026-11-07
+- **原因**：Gemini 4 Argon token 仍未恢复，由 Gemini 3.8 Flash 继续实现 Phase P5 全部用户界面与前后端状态联动，并同步更新结构化审计日志。
+- **任务目标**：根据规范交付符合现代化桌面客户端标准的全套 UI：
+  1. 仪表盘（实时速率曲面图、连接大开关、系统代理/TUN/路由模式切换、当前活动节点与内核状态）。
+  2. 节点列表（17 种协议颜色标签、延迟批量测速、模糊搜索与订阅/协议筛选、多选批量操作、节点二维码与分享链接导出）。
+  3. 订阅管理（流量配额进度条、到期倒计时、一键更新全部、剪贴板导入与屏幕二维码扫描）。
+  4. 分流规则与 DNS 编辑器（私网/广告/大陆直连预设开关、自定义分流规则拖拽/上下微调、DoH 与 Fake-IP 地址池控制）。
+  5. 实时连接监控（活跃会话统计、目标主机/端口、规则链与流量、一键断开）。
+  6. 核心日志（彩色级别徽章、关键词检索、自动滚屏锁定、全选导出与直接配置 JSON 编辑）。
+  7. 系统设置（首选内核切换、本地端口、开机自启、管理员提权状态、中英文与深浅主题切换）。
+
+---
+
+### 2. 详细变更清单
+
+| 模块 / 文件 | 类型 | 核心改动说明 |
+|---|---|---|
+| `src-tauri/src/commands/mod.rs` | 修改 | 新增 `get_app_settings`, `save_app_settings`, `test_node_latency` (TCP ping 测速并持久化到 DB), `test_all_nodes_latency` (并发批量测速), `select_active_node` (热切换当前节点并自适应重启内核), `get_core_traffic` (Clash API 速率查询), `get_core_connections` (活动连接列表), `close_core_connection` (断开单个或全部连接) |
+| `src-tauri/src/lib.rs` | 修改 | 注册 P5 的 8 个新增 IPC 命令到 `invoke_handler` |
+| `src/lib/ipc.ts` | 修改 | 增加 P5 的所有类型安全导出（`CoreTraffic`, `ConnectionItem`, `CoreConnectionsReport` 等）与异步调用封装 |
+| `src/stores/appStore.ts` | 修改 | 扩展 Zustand 全局状态：活跃节点、应用设置、路由模式、流量历史采样队列、主题、当前标签页切换 |
+| `src/lib/utils.ts` | 修改 | 补充 `formatSpeed`, `formatLatency`, `getProtocolBadge` (17 种协议颜色规范), `formatRelativeTime` 实用函数 |
+| `src/components/SpeedChart.tsx` | 新增 | 基于 Recharts 实现平滑上传/下载速率双曲线图，带深色半透明渐变与悬浮 Tooltip |
+| `src/components/AddNodeModal.tsx` | 新增 | 支持快速 URI 粘贴解析导入（支持全部 17 种协议链接）或手动表单录入 |
+| `src/components/AddSubscriptionModal.tsx` | 新增 | 订阅 URL、自定义 User-Agent、自动更新周期录入与首次自动刷新 |
+| `src/components/QrCodeModal.tsx` | 新增 | 节点二维码 SVG 展示与一键复制分享链接弹窗 |
+| `src/components/AddRuleModal.tsx` | 新增 | 自定义路由规则录入（Domain, DomainSuffix, IpCidr, Port, GeoSite, GeoIp, ProcessName）与动作分配 |
+| `src/components/Sidebar.tsx` | 修改 | 导航栏微调并新增底部内核实时在线状态指示灯与监听端口 pill |
+| `src/pages/Dashboard.tsx` | 实现 | 完整仪表盘：大开关光晕动画、实时速率仪表、模式快捷切换、活动节点状态与内核运行时信息 |
+| `src/pages/Proxies.tsx` | 实现 | 节点卡片流、协议彩色徽章、单个/一键并发测速、多选批量删除、搜索与筛选 |
+| `src/pages/Subscriptions.tsx` | 实现 | 订阅卡片、流量已用/总计百分比条、到期时间、剪贴板导入、屏幕识码与一键更新全部 |
+| `src/pages/Rules.tsx` | 实现 | 路由预设快捷开关、自定义规则上下顺序调整与删除、DNS DoH 与 Fake-IP 策略配置 |
+| `src/pages/Connections.tsx` | 实现 | 实时轮询连接列表、上/下行总量、目标域名/协议/规则匹配展示与单项/全部关闭 |
+| `src/pages/Logs.tsx` | 修改/完善 | 增强日志检索过滤、级别筛选、暂停/恢复滚屏、复制全部与临时极简配置编辑器 |
+| `src/pages/Settings.tsx` | 实现 | 首选运行内核、端口顺延配置、开机自启、管理员提权状态、多语言与深浅色模式切换 |
+| `src/i18n/locales/zh-CN.json` & `en-US.json` | 修改 | 扩充完整中英双语本地化字典（全界面无硬编码文字） |
+
+---
+
+### 3. 关键架构与设计决策（供 Argon 审查）
+1. **轻量并发测速方案**：
+   - 为避免每个节点都要启动完整代理客户端导致的开销与端口竞争，在 Rust 后端实现 `tcp_ping`，通过 `tokio::net::TcpStream::connect` 测量握手往返时延（RTT），结合 `tokio::spawn` 实现百级节点秒级并发测速，并落库至 SQLite `latency_history` 与 `nodes.latency_ms`。
+2. **前后端解耦与优雅降级**：
+   - 流量与连接查询优先经由本地 Clash API（端口 `9090`），当内核尚未启动时，IPC 优雅回退为零值对象，前端无任何白屏或异常报错。
+3. **活动节点热切换机制**：
+   - 当用户在前端切换节点时，`select_active_node` 不仅更新数据库，若当前内核处于运行状态，会自动读取最新的路由、DNS、TUN 参数，重新生成目标内核配置文件并无缝重启，用户无需手动断开再启动。
+
+---
+
+### 4. 质量审查与测试记录
+- `cargo fmt --check`：通过
+- `cargo clippy -- -D warnings`：通过（0 警告）
+- `cargo test`：全部 45 个测试通过
+- `pnpm lint`：通过（0 错误 0 警告）
+- `pnpm tsc --noEmit`：通过（0 错误）
+- `pnpm build`：构建成功（Vite 打包产物正常）

@@ -169,6 +169,14 @@ pub fn run() {
             commands::get_autostart_status,
             commands::set_autostart_status,
             commands::handle_deep_link_url,
+            commands::get_app_settings,
+            commands::save_app_settings,
+            commands::test_node_latency,
+            commands::test_all_nodes_latency,
+            commands::select_active_node,
+            commands::get_core_traffic,
+            commands::get_core_connections,
+            commands::close_core_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NovaProxy application");

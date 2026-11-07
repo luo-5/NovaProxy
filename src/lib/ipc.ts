@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AppSettings,
   CoreLogEntry,
   CoreStartRequest,
   CoreStatusInfo,
@@ -257,4 +258,75 @@ export async function handleDeepLinkUrl(
   uri: string
 ): Promise<Subscription | null> {
   return await invoke<Subscription | null>("handle_deep_link_url", { uri });
+}
+
+// ==================== Phase P5: App Settings, Latency & Traffic ====================
+
+export interface CoreTraffic {
+  up: number;
+  down: number;
+}
+
+export interface ConnectionMetadata {
+  network?: string;
+  type?: string;
+  sourceIP?: string;
+  destinationIP?: string;
+  sourcePort?: string;
+  destinationPort?: string;
+  host?: string;
+  dnsMode?: string;
+  process?: string;
+  processPath?: string;
+}
+
+export interface ConnectionItem {
+  id: string;
+  metadata: ConnectionMetadata;
+  upload: number;
+  download: number;
+  start: string;
+  chains: string[];
+  rule: string;
+  rulePayload?: string;
+}
+
+export interface CoreConnectionsReport {
+  downloadTotal: number;
+  uploadTotal: number;
+  connections: ConnectionItem[];
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  return await invoke<AppSettings>("get_app_settings");
+}
+
+export async function saveAppSettings(
+  settings: AppSettings
+): Promise<AppSettings> {
+  return await invoke<AppSettings>("save_app_settings", { settings });
+}
+
+export async function testNodeLatency(id: string): Promise<number | null> {
+  return await invoke<number | null>("test_node_latency", { id });
+}
+
+export async function testAllNodesLatency(): Promise<[string, number | null][]> {
+  return await invoke<[string, number | null][]>("test_all_nodes_latency");
+}
+
+export async function selectActiveNode(id: string): Promise<void> {
+  return await invoke<void>("select_active_node", { id });
+}
+
+export async function getCoreTraffic(): Promise<CoreTraffic> {
+  return await invoke<CoreTraffic>("get_core_traffic");
+}
+
+export async function getCoreConnections(): Promise<CoreConnectionsReport> {
+  return await invoke<CoreConnectionsReport>("get_core_connections");
+}
+
+export async function closeCoreConnection(id?: string): Promise<void> {
+  return await invoke<void>("close_core_connection", { id });
 }

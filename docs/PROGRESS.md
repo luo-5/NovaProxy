@@ -1,9 +1,9 @@
 # 进度记录与交接清单
 
 ## 当前状态
-- **当前阶段**：P4 完成 -> 准备进入 P5（完整 UI）
+- **当前阶段**：P5 完成 -> 准备进入 P6（稳定性加固）
 - **当前执行模型**：Gemini-3.8-flash（因 Argon token 耗尽交接，审计文档见 docs/FLASH_AUDIT_LOG.md 与 docs/FLASH_AUDIT_LOG.json）
-- **下一阶段**：P5（完整 UI）
+- **下一阶段**：P6（稳定性加固）
 - **下一执行模型**：Gemini-3.8-flash / Gemini-4-Argon（按用户偏好启动）
 
 ---
@@ -50,13 +50,13 @@
 - [x] 4. 单实例互斥与 URL Scheme 协议注册（`system/deeplink.rs`：`novaproxy://` 与 `clash://` 协议注册与参数解析，单实例快速唤醒并导入订阅）
 - [x] 5. 系统级端到端测试与真实内核静态校验（`tests/system_test.rs`：验证深层链接、系统代理周期、开机自启开关、以及启用 TUN 模式下 `sing-box.exe check` 与 `mihomo.exe -t` 配置校验）
 
-### 阶段 P5：完整 UI（🤖 Gemini-3.8-flash）
-- [ ] 1. 仪表盘（速度图表、开关、当前节点）
-- [ ] 2. 节点列表（多选、排序、延迟测速、详情弹窗）
-- [ ] 3. 订阅管理
-- [ ] 4. 路由规则编辑器
-- [ ] 5. 连接管理与日志查看器
-- [ ] 6. 设置面板（DNS、TUN、内核、主题、多语言、备份）
+### 阶段 P5：完整 UI（🤖 Gemini-3.8-flash 代跑，记录至 docs/FLASH_AUDIT_LOG.md）- 【已完成】
+- [x] 1. 仪表盘（`src/pages/Dashboard.tsx`、`components/SpeedChart.tsx`：双曲线平滑实时速率图、光晕大开关、系统代理/TUN/路由模式切换、当前活动节点与内核状态）
+- [x] 2. 节点列表（`src/pages/Proxies.tsx`、`components/AddNodeModal.tsx`、`components/QrCodeModal.tsx`：17 种协议颜色标签、TCP ping 并发批量测速、模糊搜索与订阅/协议筛选、多选批量删除、URI/二维码分享）
+- [x] 3. 订阅管理（`src/pages/Subscriptions.tsx`、`components/AddSubscriptionModal.tsx`：流量配额进度条、到期倒计时、一键更新全部、剪贴板导入与屏幕二维码扫描）
+- [x] 4. 路由规则编辑器（`src/pages/Rules.tsx`、`components/AddRuleModal.tsx`：内置分流规则开关、自定义规则上下排序与增删、DoH 与 Fake-IP 地址池控制）
+- [x] 5. 连接管理与日志查看器（`src/pages/Connections.tsx`、`src/pages/Logs.tsx`：实时连接监控与单项/全部断开，日志级别筛选、关键词搜索与配置编辑器）
+- [x] 6. 设置面板（`src/pages/Settings.tsx`、`components/Sidebar.tsx`、`locales/*.json`：首选内核切换、端口冲突自动顺延、开机自启、管理员提权状态、深浅主题与中英文切换）
 
 ### 阶段 P6：稳定性加固（🧠 Gemini-4-Argon）
 - [ ] 1. 内核崩溃自愈与守护重试
@@ -97,6 +97,12 @@
   - UAC 提权使用 `GetTokenInformation(TokenElevation)` 精确检测管理员权限，并实现 `ShellExecuteExW("runas")` 平滑拉起。
   - 注册表协议关联实现 `novaproxy://` 和 `clash://` 协议支持，并在单实例机制下安全传递 Deep Link URL 到已有实例。
   - 编写 `tests/system_test.rs`，全套 45 个测试全绿通过。
+- **2026-11-07 P5**：
+  - 阶段 P5 持续由 **Gemini 3.8 Flash** 完成全套 7 大页面及弹窗组件开发并记录至审计日志。
+  - 延迟测速：后端实现轻量级 `tcp_ping` 并通过 `tokio::spawn` 实现百级节点并发非阻塞测速，持久化到 SQLite `latency_history`。
+  - 流量与连接：对接本地 Clash API `/traffic` 与 `/connections`，在内核未运行时自动优雅降级，杜绝报错或白屏。
+  - 节点热切：`select_active_node` 联动后端自动重新生成目标配置并无缝平滑重载内核。
+  - 国际化与主题：全套中英文字典补齐，无任何硬编码英文；深色/浅色模式平滑切换。全套质量检查（cargo fmt, clippy, cargo test 45/45, pnpm lint, pnpm tsc, pnpm build）全绿通过。
 
 ---
 

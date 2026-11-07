@@ -174,6 +174,91 @@
         "pnpm_lint": "PASS (0 errors, 0 warnings)",
         "pnpm_tsc": "PASS"
       }
+    },
+    {
+      "phase": "P5",
+      "executed_by": "Gemini-3.8-flash",
+      "audit_by": "Gemini-4-Argon (pending review)",
+      "timestamp": "2026-11-07T16:28:00+08:00",
+      "completed_items": [
+        {
+          "item": "P5-1",
+          "name": "Dashboard Page & Real-Time Traffic Graph",
+          "files": [
+            "src/pages/Dashboard.tsx",
+            "src/components/SpeedChart.tsx",
+            "src/stores/appStore.ts"
+          ],
+          "description": "Hero connect button with animated glow, dual Recharts area curves, live Clash API traffic polling, system proxy & TUN quick switches, active proxy card, and core runtime info"
+        },
+        {
+          "item": "P5-2",
+          "name": "Proxies Page & Batch Operations",
+          "files": [
+            "src/pages/Proxies.tsx",
+            "src/components/AddNodeModal.tsx",
+            "src/components/QrCodeModal.tsx",
+            "src/lib/utils.ts"
+          ],
+          "description": "17 protocol color-coded badges, latency badges with per-node refresh and concurrent batch testing, quick URI parse import, QR code generation modal, and multi-select batch delete"
+        },
+        {
+          "item": "P5-3",
+          "name": "Subscriptions Management",
+          "files": [
+            "src/pages/Subscriptions.tsx",
+            "src/components/AddSubscriptionModal.tsx"
+          ],
+          "description": "Traffic quota progress bar, expiration countdown, update-all button with concurrent processing, clipboard import, and screen QR code scanner"
+        },
+        {
+          "item": "P5-4",
+          "name": "Split Routing & DNS Editor",
+          "files": [
+            "src/pages/Rules.tsx",
+            "src/components/AddRuleModal.tsx"
+          ],
+          "description": "Built-in preset switches (Private IP, Mainland Direct, Ad Block), custom rule insertion and reordering up/down, and DoH / Fake-IP DNS policies"
+        },
+        {
+          "item": "P5-5",
+          "name": "Connections Monitor & Core Logs Console",
+          "files": [
+            "src/pages/Connections.tsx",
+            "src/pages/Logs.tsx"
+          ],
+          "description": "Real-time active connection tracking with destination, network, rule match, and close buttons; log console with level filtering, keyword search, auto-scroll pause, and clipboard copy"
+        },
+        {
+          "item": "P5-6",
+          "name": "Settings Page & Localization",
+          "files": [
+            "src/pages/Settings.tsx",
+            "src/components/Sidebar.tsx",
+            "src/i18n/locales/zh-CN.json",
+            "src/i18n/locales/en-US.json"
+          ],
+          "description": "Preferred core switcher, port conflict auto-fallback, autostart toggle, UAC elevation status & relaunch, theme toggle, and complete bilingual i18n"
+        },
+        {
+          "item": "P5-7",
+          "name": "Backend IPC Expansion for Latency & Traffic",
+          "files": [
+            "src-tauri/src/commands/mod.rs",
+            "src-tauri/src/lib.rs",
+            "src/lib/ipc.ts"
+          ],
+          "description": "Added get/save app_settings, TCP ping node latency testing (single & concurrent all), select_active_node with live core restart, and Clash API traffic & connections query"
+        }
+      ],
+      "verification": {
+        "cargo_fmt": "PASS",
+        "cargo_clippy": "PASS",
+        "cargo_test": "PASS (45/45 passed)",
+        "pnpm_lint": "PASS (0 errors, 0 warnings)",
+        "pnpm_tsc": "PASS (0 errors)",
+        "pnpm_build": "PASS (Vite build in 6.84s)"
+      }
     }
   ]
 }
