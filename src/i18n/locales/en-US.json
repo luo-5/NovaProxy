@@ -1,0 +1,27 @@
+{
+  "app": {
+    "title": "NovaProxy",
+    "version": "Version"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "proxies": "Proxies",
+    "subscriptions": "Subscriptions",
+    "rules": "Rules",
+    "connections": "Connections",
+    "logs": "Logs",
+    "settings": "Settings"
+  },
+  "dashboard": {
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "clickToConnect": "Connect",
+    "clickToDisconnect": "Disconnect",
+    "uploadSpeed": "Upload Speed",
+    "downloadSpeed": "Download Speed",
+    "systemProxy": "System Proxy",
+    "tunMode": "TUN Mode",
+    "currentProxy": "Current Proxy",
+    "none": "None"
+  }
+}

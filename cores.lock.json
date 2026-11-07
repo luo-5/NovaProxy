@@ -1,0 +1,17 @@
+﻿{
+    "mihomo":  {
+                   "url":  "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/mihomo-windows-amd64-compatible-v1.19.33.zip",
+                   "sha256":  "926BFEA2CE48A247D6A7CE4CF641980E416202D5E40FE4EE5C949089ACE0E197",
+                   "version":  "v1.19.33"
+               },
+    "sing-box":  {
+                     "url":  "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+                     "sha256":  "8F30682EE198855440D2A7FE070D5D3653793B2D01BB8C85EEA88F93BBE7C8B9",
+                     "version":  "v1.14.4"
+                 },
+    "xray":  {
+                 "url":  "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-windows-64.zip",
+                 "sha256":  "D5B558191CCCB1E92A5772B68B8CAB67717B26F634B0F15153215F65AE982A7E",
+                 "version":  "v26.10.31"
+             }
+}

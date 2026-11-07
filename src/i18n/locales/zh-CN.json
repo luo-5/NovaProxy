@@ -1,0 +1,27 @@
+{
+  "app": {
+    "title": "NovaProxy",
+    "version": "版本"
+  },
+  "nav": {
+    "dashboard": "仪表盘",
+    "proxies": "节点列表",
+    "subscriptions": "订阅管理",
+    "rules": "分流规则",
+    "connections": "实时连接",
+    "logs": "核心日志",
+    "settings": "系统设置"
+  },
+  "dashboard": {
+    "connected": "已连接",
+    "disconnected": "未连接",
+    "clickToConnect": "点击连接",
+    "clickToDisconnect": "断开连接",
+    "uploadSpeed": "上行速率",
+    "downloadSpeed": "下行速率",
+    "systemProxy": "系统代理",
+    "tunMode": "TUN 模式",
+    "currentProxy": "当前节点",
+    "none": "无"
+  }
+}
