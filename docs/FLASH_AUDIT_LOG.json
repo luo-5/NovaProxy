@@ -1,100 +1,179 @@
 {
-  "phase": "P3",
-  "executed_by": "Gemini-3.8-flash",
-  "audit_by": "Gemini-4-Argon (pending review)",
-  "timestamp": "2026-11-07T14:31:00+08:00",
-  "completed_items": [
+  "phases": [
     {
-      "item": "P3-1",
-      "name": "Routing & DNS Data Models",
-      "files": [
-        "src-tauri/src/model/routing.rs",
-        "src-tauri/src/model/mod.rs",
-        "src/types/bindings.ts"
+      "phase": "P3",
+      "executed_by": "Gemini-3.8-flash",
+      "audit_by": "Gemini-4-Argon (pending review)",
+      "timestamp": "2026-11-07T14:31:00+08:00",
+      "completed_items": [
+        {
+          "item": "P3-1",
+          "name": "Routing & DNS Data Models",
+          "files": [
+            "src-tauri/src/model/routing.rs",
+            "src-tauri/src/model/mod.rs",
+            "src/types/bindings.ts"
+          ],
+          "description": "Defined RuleType, RuleAction, RuleItem, RoutingSettings, DnsStrategy, DnsSettings with Serde and TS bindings"
+        },
+        {
+          "item": "P3-2",
+          "name": "SQLite Routing Migration & CRUD",
+          "files": [
+            "src-tauri/src/storage/migrations/002_routing.sql",
+            "src-tauri/src/storage/db.rs"
+          ],
+          "description": "Added migration 2 for routing_rules table, with CRUD for custom rules, routing settings, and DNS settings"
+        },
+        {
+          "item": "P3-3",
+          "name": "DNS Generator",
+          "files": [
+            "src-tauri/src/generator/dns.rs"
+          ],
+          "description": "Generates domestic, remote encrypted DoH and Fake-IP configurations for sing-box, mihomo, and Xray"
+        },
+        {
+          "item": "P3-4",
+          "name": "Routing Rules Generator",
+          "files": [
+            "src-tauri/src/generator/routing.rs"
+          ],
+          "description": "Converts custom rules, private IP bypass, ads block, and CN direct presets to sing-box rule_set, mihomo rule-providers, and Xray field rules"
+        },
+        {
+          "item": "P3-5",
+          "name": "sing-box 1.14 Generator",
+          "files": [
+            "src-tauri/src/generator/singbox.rs"
+          ],
+          "description": "Generates complete sing-box 1.14 JSON with endpoints for WireGuard, detour for ShadowTLS, uTLS, selector/urltest outbounds, and route block"
+        },
+        {
+          "item": "P3-6",
+          "name": "Mihomo 1.19 Generator",
+          "files": [
+            "src-tauri/src/generator/mihomo.rs"
+          ],
+          "description": "Generates complete Mihomo YAML supporting 17 protocols, proxy-groups, rule-providers, and nameserver-policy"
+        },
+        {
+          "item": "P3-7",
+          "name": "Xray 26.10 Generator",
+          "files": [
+            "src-tauri/src/generator/xray.rs"
+          ],
+          "description": "Generates complete Xray JSON supporting VLESS/VMess/Trojan/SS/WG/HTTP/SOCKS with XHTTP, mKCP, and REALITY"
+        },
+        {
+          "item": "P3-8",
+          "name": "Multi-Core Relay & Chained Proxy",
+          "files": [
+            "src-tauri/src/generator/mod.rs"
+          ],
+          "description": "Implemented generate_multi_core_relay for two-tier bridging (e.g. Xray upstream SOCKS relay + sing-box primary engine) and dialer-proxy"
+        },
+        {
+          "item": "P3-9",
+          "name": "Tauri IPC Commands & Frontend Wrapper",
+          "files": [
+            "src-tauri/src/commands/mod.rs",
+            "src-tauri/src/lib.rs",
+            "src/lib/ipc.ts"
+          ],
+          "description": "Exposed commands for routing settings, custom rule management, DNS settings, and generate_config"
+        },
+        {
+          "item": "P3-10",
+          "name": "Core Binary Integration Check Tests",
+          "files": [
+            "src-tauri/tests/generator_check_test.rs"
+          ],
+          "description": "Verified sing-box check, mihomo -t, and xray run -test against real binaries"
+        }
       ],
-      "description": "Defined RuleType, RuleAction, RuleItem, RoutingSettings, DnsStrategy, DnsSettings with Serde and TS bindings"
+      "verification": {
+        "cargo_fmt": "PASS",
+        "cargo_clippy": "PASS",
+        "cargo_test": "PASS (35/35 passed)",
+        "pnpm_lint": "PASS (0 errors, 0 warnings)",
+        "pnpm_tsc": "PASS"
+      }
     },
     {
-      "item": "P3-2",
-      "name": "SQLite Routing Migration & CRUD",
-      "files": [
-        "src-tauri/src/storage/migrations/002_routing.sql",
-        "src-tauri/src/storage/db.rs"
+      "phase": "P4",
+      "executed_by": "Gemini-3.8-flash",
+      "audit_by": "Gemini-4-Argon (pending review)",
+      "timestamp": "2026-11-07T15:05:00+08:00",
+      "completed_items": [
+        {
+          "item": "P4-1",
+          "name": "WinINet System Proxy & Snapshot Recovery",
+          "files": [
+            "src-tauri/src/system/sysproxy.rs"
+          ],
+          "description": "Win32 registry Internet Settings manipulation + WinINet InternetSetOptionW broadcast with baseline snapshot and auto-reversion on drop/exit"
+        },
+        {
+          "item": "P4-2",
+          "name": "Process Elevation & Admin Relaunch",
+          "files": [
+            "src-tauri/src/system/elevation.rs"
+          ],
+          "description": "TokenElevation check via GetTokenInformation and ShellExecuteExW runas admin elevation request"
+        },
+        {
+          "item": "P4-3",
+          "name": "Windows Autostart Toggle",
+          "files": [
+            "src-tauri/src/system/autostart.rs"
+          ],
+          "description": "HKCU Run registry key query and toggle for silent startup"
+        },
+        {
+          "item": "P4-4",
+          "name": "TUN Mode Configuration & Inbound Injection",
+          "files": [
+            "src-tauri/src/system/tun.rs",
+            "src-tauri/src/generator/singbox.rs",
+            "src-tauri/src/generator/mihomo.rs"
+          ],
+          "description": "TunSettings data model, Wintun verification, and automatic TUN inbound injection for sing-box 1.14 and mihomo 1.19"
+        },
+        {
+          "item": "P4-5",
+          "name": "Deep Link Protocol Registration & Parser",
+          "files": [
+            "src-tauri/src/system/deeplink.rs"
+          ],
+          "description": "novaproxy:// and clash:// URL protocol registry association and deep link action parser"
+        },
+        {
+          "item": "P4-6",
+          "name": "System Tray & App Lifecycle Integration",
+          "files": [
+            "src-tauri/src/lib.rs",
+            "src-tauri/src/commands/mod.rs",
+            "src/lib/ipc.ts"
+          ],
+          "description": "System tray menu, deep link handler, and safe exit hooks that guarantee system proxy rollback"
+        },
+        {
+          "item": "P4-7",
+          "name": "System Integration Tests",
+          "files": [
+            "src-tauri/tests/system_test.rs"
+          ],
+          "description": "5 end-to-end integration tests validating deep link parsing, sysproxy snapshot/cycle, autostart, and real sing-box / mihomo binary checks with TUN enabled"
+        }
       ],
-      "description": "Added migration 2 for routing_rules table, with CRUD for custom rules, routing settings, and DNS settings"
-    },
-    {
-      "item": "P3-3",
-      "name": "DNS Generator",
-      "files": [
-        "src-tauri/src/generator/dns.rs"
-      ],
-      "description": "Generates domestic, remote encrypted DoH and Fake-IP configurations for sing-box, mihomo, and Xray"
-    },
-    {
-      "item": "P3-4",
-      "name": "Routing Rules Generator",
-      "files": [
-        "src-tauri/src/generator/routing.rs"
-      ],
-      "description": "Converts custom rules, private IP bypass, ads block, and CN direct presets to sing-box rule_set, mihomo rule-providers, and Xray field rules"
-    },
-    {
-      "item": "P3-5",
-      "name": "sing-box 1.14 Generator",
-      "files": [
-        "src-tauri/src/generator/singbox.rs"
-      ],
-      "description": "Generates complete sing-box 1.14 JSON with endpoints for WireGuard, detour for ShadowTLS, uTLS, selector/urltest outbounds, and route block"
-    },
-    {
-      "item": "P3-6",
-      "name": "Mihomo 1.19 Generator",
-      "files": [
-        "src-tauri/src/generator/mihomo.rs"
-      ],
-      "description": "Generates complete Mihomo YAML supporting 17 protocols, proxy-groups, rule-providers, and nameserver-policy"
-    },
-    {
-      "item": "P3-7",
-      "name": "Xray 26.10 Generator",
-      "files": [
-        "src-tauri/src/generator/xray.rs"
-      ],
-      "description": "Generates complete Xray JSON supporting VLESS/VMess/Trojan/SS/WG/HTTP/SOCKS with XHTTP, mKCP, and REALITY"
-    },
-    {
-      "item": "P3-8",
-      "name": "Multi-Core Relay & Chained Proxy",
-      "files": [
-        "src-tauri/src/generator/mod.rs"
-      ],
-      "description": "Implemented generate_multi_core_relay for two-tier bridging (e.g. Xray upstream SOCKS relay + sing-box primary engine) and dialer-proxy"
-    },
-    {
-      "item": "P3-9",
-      "name": "Tauri IPC Commands & Frontend Wrapper",
-      "files": [
-        "src-tauri/src/commands/mod.rs",
-        "src-tauri/src/lib.rs",
-        "src/lib/ipc.ts"
-      ],
-      "description": "Exposed commands for routing settings, custom rule management, DNS settings, and generate_config"
-    },
-    {
-      "item": "P3-10",
-      "name": "Core Binary Integration Check Tests",
-      "files": [
-        "src-tauri/tests/generator_check_test.rs"
-      ],
-      "description": "Verified sing-box check, mihomo -t, and xray run -test against real binaries"
+      "verification": {
+        "cargo_fmt": "PASS",
+        "cargo_clippy": "PASS",
+        "cargo_test": "PASS (45/45 passed)",
+        "pnpm_lint": "PASS (0 errors, 0 warnings)",
+        "pnpm_tsc": "PASS"
+      }
     }
-  ],
-  "verification": {
-    "cargo_fmt": "PASS",
-    "cargo_clippy": "PASS",
-    "cargo_test": "PASS (35/35 passed)",
-    "pnpm_lint": "PASS (0 errors, 0 warnings)",
-    "pnpm_tsc": "PASS"
-  }
+  ]
 }

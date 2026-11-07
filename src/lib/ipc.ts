@@ -11,6 +11,7 @@ import type {
   RuleItem,
   Subscription,
   SubscriptionParseReport,
+  SysProxySnapshot,
 } from "../types/bindings";
 
 export type {
@@ -42,9 +43,11 @@ export type {
   SubscriptionFormat,
   SubscriptionParseReport,
   SubscriptionUserInfo,
+  SysProxySnapshot,
   TlsConfig,
   TransportConfig,
   TransportKind,
+  TunSettings,
 } from "../types/bindings";
 
 /**
@@ -220,4 +223,38 @@ export async function generateConfig(
   activeNodeId?: string
 ): Promise<string> {
   return await invoke<string>("generate_config", { coreType, activeNodeId });
+}
+
+// ==================== Phase P4: System Proxy, TUN & Deep Links ====================
+
+export async function getSysproxyStatus(): Promise<SysProxySnapshot> {
+  return await invoke<SysProxySnapshot>("get_sysproxy_status");
+}
+
+export async function setSysproxy(
+  enabled: boolean
+): Promise<SysProxySnapshot> {
+  return await invoke<SysProxySnapshot>("set_sysproxy", { enabled });
+}
+
+export async function isProcessElevated(): Promise<boolean> {
+  return await invoke<boolean>("is_process_elevated");
+}
+
+export async function requestAdminRelaunch(): Promise<void> {
+  return await invoke<void>("request_admin_relaunch");
+}
+
+export async function getAutostartStatus(): Promise<boolean> {
+  return await invoke<boolean>("get_autostart_status");
+}
+
+export async function setAutostartStatus(enabled: boolean): Promise<boolean> {
+  return await invoke<boolean>("set_autostart_status", { enabled });
+}
+
+export async function handleDeepLinkUrl(
+  uri: string
+): Promise<Subscription | null> {
+  return await invoke<Subscription | null>("handle_deep_link_url", { uri });
 }

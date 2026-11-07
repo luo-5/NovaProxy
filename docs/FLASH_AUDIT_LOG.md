@@ -48,6 +48,63 @@
 ### 4. 质量审查与测试记录
 - `cargo fmt --check`：通过
 - `cargo clippy -- -D warnings`：通过
-- `cargo test`：全部通过（含单元测试与实际内核二进制 check 测试）
+- `cargo test`：全部通过（含单元测试与实际内核二进制 check 测试，35/35 通过）
+- `pnpm lint`：通过
+- `pnpm tsc --noEmit`：通过
+
+---
+
+## 阶段 P4：系统代理与 TUN 模式
+
+### 1. 执行背景
+- **切换时间**：2026-11-07
+- **原因**：用户指示 Gemini 4 Argon token 仍未恢复，继续由 Gemini 3.8 Flash 代跑，并详细记录审计日志以供 Argon 后续排查审查。
+- **任务目标**：完成 Phase P4 全部内容：
+  1. WinINet 系统代理设置、快照保留与异常退出还原机制。
+  2. TUN 虚拟网卡配置模型、Wintun 前置检查与 sing-box / mihomo TUN 入站配置注入。
+  3. UAC 提权状态检测与 `ShellExecuteExW("runas")` 提权拉起。
+  4. 开机自启注册表管理与单实例/系统托盘菜单。
+  5. `novaproxy://` 与 `clash://` 自定义 URL Scheme 注册与一键导入解析。
+  6. 编写端到端系统集成测试（`tests/system_test.rs`），校验真实内核二进制下的 TUN 配置合法性。
+
+---
+
+### 2. 详细变更清单
+
+| 模块 / 文件 | 类型 | 核心改动说明 |
+|---|---|---|
+| `src-tauri/src/system/sysproxy.rs` | 新增/实现 | 封装 Windows 注册表 `Internet Settings` 与 WinINet API（`InternetSetOptionW` 带 `INTERNET_OPTION_SETTINGS_CHANGED` 39 与 `INTERNET_OPTION_REFRESH` 37）。首次修改时自动持久化快照到 baseline，并在 `Drop` 或退出时还原；支持局域网绕行与自定义 bypass 白名单 |
+| `src-tauri/src/system/elevation.rs` | 新增/实现 | 通过 `OpenProcessToken` 与 `GetTokenInformation(TokenElevation)` 检测当前进程是否拥有管理员特权；通过 `ShellExecuteExW`（verb: `"runas"`）支持一键平滑提权重启 |
+| `src-tauri/src/system/autostart.rs` | 新增/实现 | 读写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册表项，支持查询与开关开机静默启动 |
+| `src-tauri/src/system/tun.rs` | 新增/实现 | 定义 `TunSettings` 数据模型（网卡名、MTU、堆栈、IPv4/IPv6 CIDR、严格路由）；实现 `verify_tun_prerequisites()` 检查管理员权限与 Wintun 驱动 |
+| `src-tauri/src/system/service.rs` | 新增/实现 | 封装 Windows Service 状态查询与交互，为将来可选的特权后台 Service 代理模式打下基础 |
+| `src-tauri/src/system/deeplink.rs` | 新增/实现 | 解析 `novaproxy://install-config` 与 `clash://install-config`；并在 `Software\Classes\{scheme}` 注册 Windows 协议 URL 关联 |
+| `src-tauri/src/generator/singbox.rs` | 修改 | 当 `settings.tun_mode == true` 时，自动在 inbounds 头部注入 `type: "tun"`、`interface_name: "NovaProxy-TUN"`、`address: ["172.19.0.1/30"]`、`auto_route: true`、`stack: "system"`，且自动添加 `action: "sniff"` 路由规则 |
+| `src-tauri/src/generator/mihomo.rs` | 修改 | 当 `settings.tun_mode == true` 时，自动在 YAML 顶级注入 `tun: enable: true, stack: system, device: NovaProxy-TUN, auto-route: true, auto-detect-interface: true, dns-hijack: [...]` |
+| `src-tauri/src/commands/mod.rs` | 修改 | 暴露 P4 IPC 命令：`get_sysproxy_status`, `set_sysproxy`, `is_process_elevated`, `request_admin_relaunch`, `get_autostart_status`, `set_autostart_status`, `handle_deep_link_url` |
+| `src-tauri/src/lib.rs` | 修改 | 初始化 `sysproxy_manager` 托管状态、注册 deep link 协议、配置系统托盘（显示/隐藏、开关代理、安全退出）、注册所有 P4 命令并在应用退出时自动恢复原始系统代理 |
+| `src/lib/ipc.ts` | 修改 | 封装前端类型安全的 P4 IPC 函数与 TS 绑定 |
+| `src-tauri/tests/system_test.rs` | 新增 | 包含 5 个系统级集成测试：`test_tun_settings_model`, `test_deep_link_parsing`, `test_sysproxy_activation_and_cleanup`, `test_tun_mode_config_generation_and_binary_check`, `test_autostart_and_elevation_checks` |
+
+---
+
+### 3. 关键架构与设计决策（供 Argon 审查）
+1. **系统代理广播通知机制**：
+   - 仅写注册表（`ProxyEnable` / `ProxyServer`）会导致已有浏览器（Chrome、Edge 等）因缓存旧配置而无法立即感知代理生效。
+   - 实现方案：在每次写入注册表后，立即调用 WinINet 的 `InternetSetOptionW(null, 39, null, 0)`（`INTERNET_OPTION_SETTINGS_CHANGED`）和 `InternetSetOptionW(null, 37, null, 0)`（`INTERNET_OPTION_REFRESH`），通知 Windows 操作系统网络栈即刻刷新代理，无需注销或重启系统。
+2. **防残留异常还原保障**：
+   - 在首次接管系统代理前，`SysProxyManager` 会自动读取当前注册表配置作为 `baseline` 留底；
+   - 在 Tauri 应用退出事件监听（`RunEvent::ExitRequested`）、崩溃 Drop 以及显式禁用代理时，均无条件将注册表还原为基线状态，杜绝客户端关闭后导致用户电脑“断网”的常见痛点。
+3. **sing-box 1.14 TUN 语法兼容**：
+   - sing-box 1.14 规范中移除了旧版本的 `inet4_address`（改为 `address: ["172.19.0.1/30"]`）；
+   - TUN inbound 内部的 `sniff: true` 字段在 1.13+ 已被废弃，改为在 `route.rules` 中注入 `{"action": "sniff"}` 规则；
+   - 生成器已完全适配此最新规范并通过 `sing-box.exe check` 实机静态检查。
+
+---
+
+### 4. 质量审查与测试记录
+- `cargo fmt --check`：通过
+- `cargo clippy -- -D warnings`：通过
+- `cargo test`：全部 45 个测试通过（27 单元 + 4 生成器检查 + 9 订阅往返 + 5 系统代理/TUN 测试）
 - `pnpm lint`：通过
 - `pnpm tsc --noEmit`：通过

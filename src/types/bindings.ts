@@ -106,3 +106,7 @@ export type DnsStrategy = "prefer_ipv4" | "prefer_ipv6" | "ipv4_only" | "ipv6_on
 
 export type DnsSettings = { enabled: boolean, fake_ip: boolean, fake_ip_range: string, domestic_dns: Array<string>, remote_dns: Array<string>, fallback_dns: Array<string>, strategy: DnsStrategy, disable_ipv6: boolean, };
 
+export type SysProxySnapshot = { enabled: boolean, server: string | null, bypass: string | null, auto_config_url: string | null, };
+
+export type TunSettings = { enabled: boolean, interface_name: string, address: string, auto_route: boolean, strict_route: boolean, stack: string, mtu: number, };
+

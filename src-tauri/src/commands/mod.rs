@@ -13,11 +13,16 @@ use crate::parser::{
     parse_share_link, parse_subscription_content, SubscriptionParseReport,
 };
 use crate::storage::Database;
+use crate::system::{
+    is_autostart_enabled, is_elevated, parse_deep_link, relaunch_as_admin, set_autostart,
+    SysProxySnapshot, SystemProxyManager,
+};
 use tauri::State;
 
 pub struct AppState {
     pub db: Database,
     pub core_manager: CoreManager,
+    pub sysproxy_manager: SystemProxyManager,
 }
 
 #[tauri::command]
@@ -305,4 +310,98 @@ pub fn generate_config(
             .or(app_settings.active_node_id.as_deref()),
     )
     .map_err(|e| e.to_string())
+}
+
+// ==================== Phase P4: System Proxy, TUN & Deep Links ====================
+
+#[tauri::command]
+pub fn get_sysproxy_status() -> Result<SysProxySnapshot, String> {
+    SystemProxyManager::query_current().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_sysproxy(state: State<'_, AppState>, enabled: bool) -> Result<SysProxySnapshot, String> {
+    let mut settings = state.db.get_app_settings().map_err(|e| e.to_string())?;
+
+    let snap = if enabled {
+        let active_port = state
+            .core_manager
+            .status()
+            .actual_mixed_port
+            .unwrap_or(settings.mixed_port);
+        let srv = format!("127.0.0.1:{}", active_port);
+        let res = state
+            .sysproxy_manager
+            .set_proxy(&srv, None)
+            .map_err(|e| e.to_string())?;
+        settings.system_proxy = true;
+        let _ = state.db.save_app_settings(&settings);
+        res
+    } else {
+        let res = state
+            .sysproxy_manager
+            .clear_proxy()
+            .map_err(|e| e.to_string())?;
+        settings.system_proxy = false;
+        let _ = state.db.save_app_settings(&settings);
+        res
+    };
+
+    Ok(snap)
+}
+
+#[tauri::command]
+pub fn is_process_elevated() -> Result<bool, String> {
+    Ok(is_elevated())
+}
+
+#[tauri::command]
+pub fn request_admin_relaunch() -> Result<(), String> {
+    relaunch_as_admin(&[]).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_autostart_status() -> Result<bool, String> {
+    is_autostart_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_autostart_status(enabled: bool) -> Result<bool, String> {
+    set_autostart(enabled).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn handle_deep_link_url(
+    state: State<'_, AppState>,
+    uri: String,
+) -> Result<Option<Subscription>, String> {
+    let Some(action) = parse_deep_link(&uri) else {
+        return Ok(None);
+    };
+
+    let sub = Subscription {
+        id: format!("sub-{}", uuid::Uuid::new_v4()),
+        name: action
+            .name
+            .unwrap_or_else(|| "Imported Subscription".to_string()),
+        url: action.subscription_url,
+        enabled: true,
+        user_agent: Some("clash.meta".to_string()),
+        update_interval_mins: Some(1440),
+        use_proxy: false,
+        updated_at: None,
+        upload: None,
+        download: None,
+        total: None,
+        expire: None,
+        home_url: None,
+        sort_order: 0,
+    };
+
+    state
+        .db
+        .upsert_subscription(&sub)
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(sub))
 }

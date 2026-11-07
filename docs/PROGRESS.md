@@ -1,10 +1,10 @@
 # 进度记录与交接清单
 
 ## 当前状态
-- **当前阶段**：P3 完成 -> 准备进入 P4
-- **当前执行模型**：Gemini-3.8-flash（因 Argon token 耗尽交接，审计文档见 docs/FLASH_AUDIT_LOG.md）
-- **下一阶段**：P4（系统代理与 TUN 模式）
-- **下一执行模型**：Gemini-4-Argon（若仍无 token 可由 Gemini-3.8-flash 继续）
+- **当前阶段**：P4 完成 -> 准备进入 P5（完整 UI）
+- **当前执行模型**：Gemini-3.8-flash（因 Argon token 耗尽交接，审计文档见 docs/FLASH_AUDIT_LOG.md 与 docs/FLASH_AUDIT_LOG.json）
+- **下一阶段**：P5（完整 UI）
+- **下一执行模型**：Gemini-3.8-flash / Gemini-4-Argon（按用户偏好启动）
 
 ---
 
@@ -43,11 +43,12 @@
 - [x] 5. 跨内核协同与链式代理方案（`generator/mod.rs`：`generate_multi_core_relay` 实现 Xray 独占协议如 XHTTP/mKCP 作为上游 SOCKS5 本地中继，sing-box 作为主内核负责路由与 TUN；支持 `dialer_proxy` 前置代理）
 - [x] 6. 快照测试与内核配置有效性 check（`tests/generator_check_test.rs`：调用实际 `sing-box.exe check`、`mihomo.exe -t`、`xray.exe run -test` 对生成配置进行端到端静态校验，全部绿灯通过）
 
-### 阶段 P4：系统代理与 TUN 模式（🧠 Gemini-4-Argon）
-- [ ] 1. WinINet 系统代理设置与异常恢复
-- [ ] 2. TUN 虚拟网卡配置与提权/后台服务方案
-- [ ] 3. 开机自启、系统托盘菜单
-- [ ] 4. 单实例互斥与 URL Scheme 协议注册
+### 阶段 P4：系统代理与 TUN 模式（🤖 Gemini-3.8-flash 代跑，记录至 docs/FLASH_AUDIT_LOG.md）- 【已完成】
+- [x] 1. WinINet 系统代理设置与异常恢复（`system/sysproxy.rs`：Win32 注册表 + WinINet `InternetSetOptionW` 广播刷新，基线快照持久化，应用退出/崩溃 Drop 自动还原，局域网与自定义白名单 bypass）
+- [x] 2. TUN 虚拟网卡配置与提权/后台服务方案（`system/tun.rs`：`TunSettings` 适配 Wintun 与 sing-box 1.14 / mihomo 1.19 TUN 入站语法注入，`system/elevation.rs`：TokenElevation 检测与 `ShellExecuteExW` "runas" 提权请求）
+- [x] 3. 开机自启、系统托盘菜单（`system/autostart.rs`：注册表 `Run` 项静默启动管理，`lib.rs`：系统托盘右键菜单显隐窗口、一键开关系统代理与安全退出）
+- [x] 4. 单实例互斥与 URL Scheme 协议注册（`system/deeplink.rs`：`novaproxy://` 与 `clash://` 协议注册与参数解析，单实例快速唤醒并导入订阅）
+- [x] 5. 系统级端到端测试与真实内核静态校验（`tests/system_test.rs`：验证深层链接、系统代理周期、开机自启开关、以及启用 TUN 模式下 `sing-box.exe check` 与 `mihomo.exe -t` 配置校验）
 
 ### 阶段 P5：完整 UI（🤖 Gemini-3.8-flash）
 - [ ] 1. 仪表盘（速度图表、开关、当前节点）
@@ -89,6 +90,13 @@
   - sing-box 1.14 语法调整：WireGuard 按照最新标准生成顶级 `endpoints: [{"type": "wireguard", "peers": [{"allowed_ips": ["0.0.0.0/0", "::/0"], ...}]}]`，outbound/selector 直连其 tag；ShadowTLS 采用外层 shadowtls 出站 + 内层 Shadowsocks 的 `detour` 链式调用；NaiveProxy 在无 `libcronet.dll` 时自动降级为具有相同 HTTP/2 CONNECT + TLS/uTLS 特性的 `http` 出站。
   - Xray-core 私有 IP 绕行规则使用显式 CIDR 列表生成，规避内核运行目录缺少 `geoip.dat` 时的解析失败。
   - 编写 `tests/generator_check_test.rs`，端到端调用真实的 `sing-box.exe check`、`mihomo.exe -t`、`xray.exe run -test` 对生成配置进行校验，并验证多内核协同中继（Xray 上游 + sing-box 主控）。全部 35 个测试（22 单元 + 4 内核校验 + 9 订阅与链接往返）全部通过。
+- **2026-11-07 P4**：
+  - 阶段 P4 持续由 **Gemini 3.8 Flash** 实现并记录至 `docs/FLASH_AUDIT_LOG.md` 与 `docs/FLASH_AUDIT_LOG.json`。
+  - 系统代理使用 Windows 注册表 + WinINet API（`InternetSetOptionW` 39 与 37），确保 Chrome/Edge/系统组件免重启即刻感知代理变更；引入 `baseline` 快照机制，在应用异常退出或崩溃 Drop 时无条件恢复用户初始代理状态，杜绝断网痛点。
+  - TUN 模式适配 sing-box 1.14 与 mihomo 1.19 最新标准（sing-box 废弃 `inet4_address` 改用 `address: ["172.19.0.1/30"]`，废弃 inbound 级 `sniff: true` 改用 route rule 级 `action: "sniff"`）。
+  - UAC 提权使用 `GetTokenInformation(TokenElevation)` 精确检测管理员权限，并实现 `ShellExecuteExW("runas")` 平滑拉起。
+  - 注册表协议关联实现 `novaproxy://` 和 `clash://` 协议支持，并在单实例机制下安全传递 Deep Link URL 到已有实例。
+  - 编写 `tests/system_test.rs`，全套 45 个测试全绿通过。
 
 ---
 

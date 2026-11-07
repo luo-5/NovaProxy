@@ -62,12 +62,26 @@ pub fn generate_singbox_config(
         "127.0.0.1"
     };
 
-    let mut inbounds = vec![json!({
+    let mut inbounds = Vec::new();
+
+    if settings.tun_mode {
+        inbounds.push(json!({
+            "type": "tun",
+            "tag": "tun-in",
+            "interface_name": "NovaProxy-TUN",
+            "address": ["172.19.0.1/30"],
+            "auto_route": true,
+            "strict_route": true,
+            "stack": "system"
+        }));
+    }
+
+    inbounds.push(json!({
         "type": "mixed",
         "tag": "mixed-in",
         "listen": listen_host,
         "listen_port": settings.mixed_port
-    })];
+    }));
 
     if let Some(sp) = settings.socks_port {
         if sp > 0 && sp != settings.mixed_port {

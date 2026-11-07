@@ -17,6 +17,7 @@ use crate::core::{
 };
 use crate::monitor::{CoreLogEntry, LogStream};
 use crate::parser::{SubscriptionFormat, SubscriptionParseReport, SubscriptionUserInfo};
+use crate::system::{SysProxySnapshot, TunSettings};
 use ts_rs::TS;
 
 /// Generates consolidated TypeScript type definitions for all IPC models using `ts-rs`
@@ -75,6 +76,8 @@ pub fn generate_typescript_bindings() -> String {
         RoutingSettings::decl(),
         DnsStrategy::decl(),
         DnsSettings::decl(),
+        SysProxySnapshot::decl(),
+        TunSettings::decl(),
     ];
 
     let mut out = String::from(

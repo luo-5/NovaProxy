@@ -13,6 +13,9 @@ use monitor::CoreLogEntry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use storage::Database;
+use system::SystemProxyManager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 
 struct TauriEventSink {
@@ -68,7 +71,63 @@ pub fn run() {
             });
             core_manager.set_event_sink(sink);
 
-            app.manage(AppState { db, core_manager });
+            let sysproxy_manager = SystemProxyManager::new();
+            let _ = system::register_url_schemes();
+
+            let toggle_i = MenuItemBuilder::with_id("toggle", "Show / Hide Window").build(app)?;
+            let quit_i = MenuItemBuilder::with_id("quit", "Exit").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&toggle_i)
+                .separator()
+                .item(&quit_i)
+                .build()?;
+
+            let _tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .tooltip("NovaProxy")
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "quit" => {
+                        let state = app.state::<AppState>();
+                        let _ = state.sysproxy_manager.restore_original();
+                        app.exit(0);
+                    }
+                    "toggle" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(win) = app.get_webview_window("main") {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
+            app.manage(AppState {
+                db,
+                core_manager,
+                sysproxy_manager,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -103,6 +162,13 @@ pub fn run() {
             commands::get_dns_settings,
             commands::save_dns_settings,
             commands::generate_config,
+            commands::get_sysproxy_status,
+            commands::set_sysproxy,
+            commands::is_process_elevated,
+            commands::request_admin_relaunch,
+            commands::get_autostart_status,
+            commands::set_autostart_status,
+            commands::handle_deep_link_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NovaProxy application");

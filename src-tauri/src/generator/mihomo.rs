@@ -49,6 +49,15 @@ pub fn generate_mihomo_config(
         }
     }
 
+    if settings.tun_mode {
+        out.push_str("tun:\n");
+        out.push_str("  enable: true\n");
+        out.push_str("  stack: system\n");
+        out.push_str("  device: NovaProxy-TUN\n");
+        out.push_str("  auto-route: true\n");
+        out.push_str("  auto-detect-interface: true\n");
+    }
+
     // 2. DNS section
     out.push_str(&generate_mihomo_dns_yaml(dns));
 
