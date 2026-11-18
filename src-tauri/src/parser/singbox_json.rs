@@ -174,8 +174,22 @@ fn parse_sb_outbound(obj: &Map<String, Value>, sort_order: i32) -> Option<ParseR
     let parse_inner = || -> ParseResult<ProxyNode> {
         let raw_server = j_string(obj, "server").ok_or(ParseError::MissingField("server"))?;
         let server = normalize_host(&raw_server);
+        let server_ports = j_string_vec(obj, "server_ports");
+        let fallback_hy2_port = if ob_type == "hysteria2" {
+            server_ports
+                .first()
+                .and_then(|spec| {
+                    spec.split(&[':', '-'][..])
+                        .next()
+                        .and_then(|s| s.trim().parse::<u16>().ok())
+                })
+                .or(Some(443))
+        } else {
+            None
+        };
         let port = j_u16(obj, "server_port")
             .or_else(|| j_u16(obj, "port"))
+            .or(fallback_hy2_port)
             .filter(|&p| p > 0)
             .ok_or_else(|| ParseError::InvalidPort("missing server_port".to_string()))?;
 
@@ -258,6 +272,27 @@ fn parse_sb_outbound(obj: &Map<String, Value>, sort_order: i32) -> Option<ParseR
                     Some(o) => (j_string(o, "type"), j_string(o, "password")),
                     None => (None, None),
                 };
+                let normalized_ports = if server_ports.is_empty() {
+                    None
+                } else {
+                    Some(
+                        server_ports
+                            .iter()
+                            .map(|p| p.replace(':', "-"))
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                };
+                let hop_interval = j_string(obj, "hop_interval").and_then(|s| {
+                    let t = s.trim().to_ascii_lowercase();
+                    if let Some(m) = t.strip_suffix('m') {
+                        m.trim().parse::<u32>().ok().map(|v| v * 60)
+                    } else if let Some(sec) = t.strip_suffix('s') {
+                        sec.trim().parse::<u32>().ok()
+                    } else {
+                        t.parse::<u32>().ok()
+                    }
+                });
                 (
                     ProtocolType::Hysteria2,
                     ProtocolConfig::Hysteria2(Hysteria2Config {
@@ -267,8 +302,8 @@ fn parse_sb_outbound(obj: &Map<String, Value>, sort_order: i32) -> Option<ParseR
                         down_mbps: j_u32(obj, "down_mbps"),
                         obfs_type,
                         obfs_password,
-                        ports: j_string_vec(obj, "server_ports").first().cloned(),
-                        hop_interval: None,
+                        ports: normalized_ports,
+                        hop_interval,
                     }),
                 )
             }

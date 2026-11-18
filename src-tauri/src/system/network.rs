@@ -1,10 +1,13 @@
-//! Windows Network Change Listener
-//! Listens for network interface, adapter, and IP routing table changes
-//! using Win32 `NotifyAddrChange` and ensures WinINet system proxy state
-//! remains consistent across WiFi changes, sleep/wake, and VPN tunnel events.
+//! Cross-platform Network Change Listener
+//! Listens for network interface, adapter, and IP routing changes:
+//! - Windows: Win32 `NotifyAddrChange` + WinINet refresh
+//! - macOS / Linux / Android: lightweight default-route/interface IP watcher
 
+use crate::monitor::TelemetryTracker;
 use crate::system::sysproxy::SystemProxyManager;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(not(target_os = "windows"))]
 use std::time::Duration;
@@ -57,8 +60,17 @@ mod win32 {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn probe_outbound_local_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
+}
+
 pub struct NetworkChangeListener {
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     sysproxy: SystemProxyManager,
+    telemetry: Option<TelemetryTracker>,
     running: Arc<AtomicBool>,
     #[cfg(target_os = "windows")]
     stop_event: Arc<AtomicUsize>,
@@ -68,6 +80,17 @@ impl NetworkChangeListener {
     pub fn new(sysproxy: SystemProxyManager) -> Self {
         Self {
             sysproxy,
+            telemetry: None,
+            running: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "windows")]
+            stop_event: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn with_telemetry(sysproxy: SystemProxyManager, telemetry: TelemetryTracker) -> Self {
+        Self {
+            sysproxy,
+            telemetry: Some(telemetry),
             running: Arc::new(AtomicBool::new(false)),
             #[cfg(target_os = "windows")]
             stop_event: Arc::new(AtomicUsize::new(0)),
@@ -91,14 +114,14 @@ impl NetworkChangeListener {
         }
     }
 
-    pub fn start(self: Arc<Self>) -> std::thread::JoinHandle<()> {
+    pub fn start(self: Arc<Self>) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
         self.running.store(true, Ordering::SeqCst);
         let listener = self.clone();
 
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("novaproxy-netchange".to_string())
             .spawn(move || {
-                tracing::info!("Windows network change listener thread started");
+                tracing::info!("Network change listener thread started");
 
                 #[cfg(target_os = "windows")]
                 {
@@ -116,29 +139,33 @@ impl NetworkChangeListener {
                     };
 
                     let handles = [stop_h, change_h];
+                    let mut pending_notify = false;
 
                     while listener.running.load(Ordering::SeqCst) {
                         let mut handle_out: Handle = std::ptr::null_mut();
                         unsafe {
-                            ResetEvent(change_h);
-                            let _ = NotifyAddrChange(&mut handle_out, &mut overlapped);
+                            if !pending_notify {
+                                ResetEvent(change_h);
+                                let _ = NotifyAddrChange(&mut handle_out, &mut overlapped);
+                                pending_notify = true;
+                            }
                             let wait_res = WaitForMultipleObjects(2, handles.as_ptr(), 0, 3000);
 
                             if wait_res == WAIT_OBJECT_0 {
-                                // Stop event signaled
                                 break;
                             } else if wait_res == WAIT_OBJECT_0 + 1 {
-                                // Network address changed
+                                pending_notify = false;
+                                if let Some(ref t) = listener.telemetry {
+                                    t.record_network_change();
+                                }
                                 tracing::info!("Network interface or address change detected");
                                 if listener.sysproxy.is_active() {
-                                    // Refresh WinINet options to keep browsers & OS aligned
                                     let _ = SystemProxyManager::refresh_wininet();
                                     tracing::debug!(
                                         "Refreshed WinINet proxy settings after network change"
                                     );
                                 }
                             } else if wait_res == WAIT_TIMEOUT {
-                                // Periodic loop check
                                 continue;
                             }
                         }
@@ -153,14 +180,36 @@ impl NetworkChangeListener {
 
                 #[cfg(not(target_os = "windows"))]
                 {
+                    let mut last_ip = probe_outbound_local_ip();
+                    let mut elapsed_ms = 0u32;
                     while listener.running.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(500));
+                        std::thread::sleep(Duration::from_millis(250));
+                        elapsed_ms = elapsed_ms.saturating_add(250);
+                        if elapsed_ms >= 3000 {
+                            elapsed_ms = 0;
+                            let current_ip = probe_outbound_local_ip();
+                            if current_ip != last_ip {
+                                if let Some(ref t) = listener.telemetry {
+                                    t.record_network_change();
+                                }
+                                tracing::info!(
+                                    prev = ?last_ip,
+                                    next = ?current_ip,
+                                    "Network default interface IP change detected"
+                                );
+                                last_ip = current_ip;
+                            }
+                        }
                     }
                 }
 
-                tracing::info!("Windows network change listener thread stopped");
-            })
-            .expect("Failed to spawn network change listener thread")
+                tracing::info!("Network change listener thread stopped");
+            });
+
+        if spawned.is_err() {
+            self.running.store(false, Ordering::SeqCst);
+        }
+        spawned
     }
 }
 
@@ -180,10 +229,12 @@ mod tests {
         let listener = Arc::new(NetworkChangeListener::new(sysproxy));
         assert!(!listener.is_running());
 
-        let handle = listener.clone().start();
+        let handle = listener
+            .clone()
+            .start()
+            .expect("spawn network change listener");
         assert!(listener.is_running());
 
-        // Let it run for a brief moment
         std::thread::sleep(std::time::Duration::from_millis(50));
         listener.stop();
         let _ = handle.join();

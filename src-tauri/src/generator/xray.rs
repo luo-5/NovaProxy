@@ -84,11 +84,21 @@ pub fn generate_xray_config(
         .and_then(|id| nodes.iter().find(|n| n.id == id))
         .or_else(|| nodes.first());
 
-    let primary_tag = primary_node.map(|n| n.id.as_str()).unwrap_or("proxy");
+    let mut primary_tag = primary_node.map(|n| n.id.as_str()).unwrap_or("direct");
 
     if let Some(target_node) = primary_node {
         if let Some(ob) = compile_xray_outbound(target_node, &target_node.id) {
             outbounds.push(ob);
+        } else if routing.mode != crate::model::settings::RoutingMode::Direct {
+            return Err(XrayGeneratorError::InvalidNodeConfig(
+                target_node.name.clone(),
+                format!(
+                    "protocol '{}' is not supported natively by Xray",
+                    target_node.protocol
+                ),
+            ));
+        } else {
+            primary_tag = "direct";
         }
     }
 
@@ -126,6 +136,13 @@ pub fn generate_xray_config(
 }
 
 fn compile_xray_outbound(node: &ProxyNode, tag: &str) -> Option<Value> {
+    if matches!(
+        node.transport_kind(),
+        crate::model::node::TransportKind::Http | crate::model::node::TransportKind::Quic
+    ) {
+        return None;
+    }
+
     match &node.settings {
         ProtocolConfig::Vless(vl) => {
             let mut user_obj = json!({
@@ -263,13 +280,16 @@ fn compile_xray_outbound(node: &ProxyNode, tag: &str) -> Option<Value> {
                 server_obj["users"] = json!([{ "user": u, "pass": p }]);
             }
 
-            let ob = json!({
+            let mut ob = json!({
                 "tag": tag,
                 "protocol": "http",
                 "settings": {
                     "servers": [ server_obj ]
                 }
             });
+            if node.tls.as_ref().is_some_and(|t| t.enabled) {
+                ob["streamSettings"] = compile_xray_stream_settings(node);
+            }
             Some(ob)
         }
         _ => None,
@@ -430,6 +450,32 @@ fn compile_xray_stream_settings(node: &ProxyNode) -> Value {
                     up_obj["host"] = json!(h);
                 }
                 stream.insert("httpupgradeSettings".to_string(), up_obj);
+            }
+            TransportConfig::Tcp {
+                header_type,
+                http_host,
+                http_path,
+            } if header_type
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case("http")) =>
+            {
+                let mut req = Map::new();
+                req.insert(
+                    "path".to_string(),
+                    json!([http_path.as_deref().unwrap_or("/")]),
+                );
+                if !http_host.is_empty() {
+                    req.insert("headers".to_string(), json!({ "Host": http_host }));
+                }
+                stream.insert(
+                    "tcpSettings".to_string(),
+                    json!({
+                        "header": {
+                            "type": "http",
+                            "request": Value::Object(req)
+                        }
+                    }),
+                );
             }
             _ => {}
         }

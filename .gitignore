@@ -8,11 +8,14 @@ build/
 target/
 src-tauri/target/
 
-# Core binaries (downloaded via scripts/fetch-cores.ps1)
-src-tauri/resources/cores/*.exe
-src-tauri/resources/cores/*.zip
-src-tauri/resources/cores/*.gz
+# Core binaries (downloaded via scripts/fetch-cores.ps1 or scripts/fetch-cores.sh)
+src-tauri/resources/cores/*
 !src-tauri/resources/cores/.gitkeep
+
+# Android generated project, Gradle artifacts & downloaded .so cores (regenerated via tauri android init + configure-android.mjs)
+src-tauri/gen/android/
+src-tauri/plugins/**/android/.tauri/
+src-tauri/plugins/**/android/build/
 
 # Environment & temporary
 .env

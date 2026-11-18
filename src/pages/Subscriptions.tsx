@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Rss,
@@ -11,6 +11,8 @@ import {
   HardDrive,
 } from "lucide-react";
 import {
+  getAppSettings,
+  listNodes,
   listSubscriptions,
   deleteSubscription,
   refreshSubscription,
@@ -19,11 +21,13 @@ import {
   upsertSubscription,
   type Subscription,
 } from "../lib/ipc";
+import { useAppStore } from "../stores/appStore";
 import { formatBytes, formatRelativeTime } from "../lib/utils";
 import { AddSubscriptionModal } from "../components/AddSubscriptionModal";
 
 export const Subscriptions: React.FC = () => {
   const { t } = useTranslation();
+  const { activeNode, setActiveNode, setAppSettings, platformInfo } = useAppStore();
 
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -31,6 +35,7 @@ export const Subscriptions: React.FC = () => {
   const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
   const [isAddOpen, setIsAddOpen] = useState<boolean>(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   const fetchSubs = async () => {
     try {
@@ -45,11 +50,27 @@ export const Subscriptions: React.FC = () => {
 
   useEffect(() => {
     fetchSubs();
+    const onUpdated = () => {
+      fetchSubs();
+    };
+    window.addEventListener("novaproxy:subscriptions-updated", onUpdated);
+    return () => {
+      window.removeEventListener("novaproxy:subscriptions-updated", onUpdated);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
   }, []);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3000);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMsg(null);
+      toastTimerRef.current = null;
+    }, 3000);
   };
 
   // Update single subscription
@@ -59,9 +80,9 @@ export const Subscriptions: React.FC = () => {
     try {
       const report = await refreshSubscription(id);
       await fetchSubs();
-      showToast(`Updated! ${report.nodes.length} nodes parsed.`);
+      showToast(t("subscriptions.subUpdatedCount", { count: report.nodes.length }));
     } catch (err) {
-      showToast(`Update failed: ${String(err)}`);
+      showToast(t("subscriptions.subUpdateFailed", { err: String(err) }));
     } finally {
       setUpdatingIds((prev) => {
         const next = new Set(prev);
@@ -76,6 +97,7 @@ export const Subscriptions: React.FC = () => {
     if (updatingAll || subscriptions.length === 0) return;
     setUpdatingAll(true);
     let totalImported = 0;
+    let failedCount = 0;
     try {
       for (const sub of subscriptions) {
         if (!sub.enabled) continue;
@@ -83,11 +105,13 @@ export const Subscriptions: React.FC = () => {
           const report = await refreshSubscription(sub.id);
           totalImported += report.nodes.length;
         } catch {
-          // ignore single failure
+          failedCount += 1;
         }
       }
       await fetchSubs();
-      showToast(`All subscriptions updated (${totalImported} nodes total).`);
+      showToast(
+        t("subscriptions.allSubsUpdated", { count: totalImported, failed: failedCount })
+      );
     } finally {
       setUpdatingAll(false);
     }
@@ -99,7 +123,19 @@ export const Subscriptions: React.FC = () => {
     try {
       await deleteSubscription(id);
       setSubscriptions((prev) => prev.filter((s) => s.id !== id));
-      showToast("Subscription deleted");
+      if (activeNode?.subscription_id === id) {
+        const [freshSettings, remainingNodes] = await Promise.all([
+          getAppSettings().catch(() => null),
+          listNodes().catch(() => []),
+        ]);
+        if (freshSettings) setAppSettings(freshSettings);
+        const replacement =
+          freshSettings?.active_node_id
+            ? remainingNodes.find((n) => n.id === freshSettings.active_node_id) ?? null
+            : null;
+        setActiveNode(replacement);
+      }
+      showToast(t("subscriptions.subDeleted"));
     } catch (err) {
       showToast(String(err));
     }
@@ -110,13 +146,13 @@ export const Subscriptions: React.FC = () => {
     try {
       const text = await navigator.clipboard.readText();
       if (!text.trim()) {
-        showToast("Clipboard is empty");
+        showToast(t("common.clipboardEmpty"));
         return;
       }
       const report = await importClipboardNodes(text);
       showToast(t("subscriptions.importSuccess", { count: report.nodes.length }));
     } catch (err) {
-      showToast(`Import failed: ${String(err)}`);
+      showToast(t("subscriptions.importFailed", { err: String(err) }));
     }
   };
 
@@ -125,7 +161,7 @@ export const Subscriptions: React.FC = () => {
     try {
       const found = await scanScreenQr();
       if (found.length === 0) {
-        showToast("No QR code detected on screen");
+        showToast(t("subscriptions.noQrDetected"));
         return;
       }
       let count = 0;
@@ -133,9 +169,9 @@ export const Subscriptions: React.FC = () => {
         const rep = await importClipboardNodes(text).catch(() => null);
         if (rep) count += rep.nodes.length;
       }
-      showToast(`Screen scan complete! ${count} nodes imported.`);
+      showToast(t("subscriptions.scanComplete", { count }));
     } catch (err) {
-      showToast(`Scan failed: ${String(err)}`);
+      showToast(t("subscriptions.scanFailed", { err: String(err) }));
     }
   };
 
@@ -153,10 +189,10 @@ export const Subscriptions: React.FC = () => {
   };
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-6">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6">
       {/* Toast Notification */}
       {toastMsg && (
-        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-card border border-border text-foreground shadow-2xl text-xs font-medium animate-in fade-in slide-in-from-bottom-2">
+        <div className="fixed bottom-16 md:bottom-6 right-4 md:right-6 z-50 px-4 py-2.5 rounded-xl bg-card border border-border text-foreground shadow-2xl text-xs font-medium animate-in fade-in slide-in-from-bottom-2">
           {toastMsg}
         </div>
       )}
@@ -177,13 +213,15 @@ export const Subscriptions: React.FC = () => {
             <span>{t("subscriptions.importClipboard")}</span>
           </button>
 
-          <button
-            onClick={handleScanScreenQr}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-secondary text-secondary-foreground text-xs font-medium rounded-xl hover:bg-secondary/80 transition-colors"
-          >
-            <QrCode className="w-3.5 h-3.5" />
-            <span>{t("subscriptions.scanQr")}</span>
-          </button>
+          {(platformInfo?.supports_screen_qr ?? true) && (
+            <button
+              onClick={handleScanScreenQr}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-secondary text-secondary-foreground text-xs font-medium rounded-xl hover:bg-secondary/80 transition-colors"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              <span>{t("subscriptions.scanQr")}</span>
+            </button>
+          )}
 
           <button
             disabled={updatingAll || subscriptions.length === 0}

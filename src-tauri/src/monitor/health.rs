@@ -4,10 +4,15 @@
 
 use crate::core::manager::CoreLifecycleState;
 use crate::core::CoreManager;
+use crate::model::CoreType;
+use crate::monitor::latency::{
+    probe_clash_api_delay, probe_url_via_socks_proxy, tcp_ping, DEFAULT_LATENCY_TEST_URL,
+};
 use crate::storage::Database;
+use chrono::Utc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -49,9 +54,11 @@ pub struct HealthMonitor {
     core_manager: CoreManager,
     running: Arc<AtomicBool>,
     consecutive_failures: Arc<AtomicU32>,
+    last_failover_at: Arc<AtomicI64>,
     max_failures: u32,
     check_interval: Duration,
     probe_timeout: Duration,
+    failover_cooldown: Duration,
     last_result: Arc<RwLock<Option<HealthCheckResult>>>,
 }
 
@@ -62,9 +69,11 @@ impl HealthMonitor {
             core_manager,
             running: Arc::new(AtomicBool::new(false)),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
+            last_failover_at: Arc::new(AtomicI64::new(0)),
             max_failures: 2,
             check_interval: Duration::from_secs(30),
             probe_timeout: Duration::from_millis(3000),
+            failover_cooldown: Duration::from_secs(30),
             last_result: Arc::new(RwLock::new(None)),
         }
     }
@@ -78,6 +87,11 @@ impl HealthMonitor {
         self.check_interval = interval;
         self.probe_timeout = probe_timeout;
         self.max_failures = max_failures;
+        self
+    }
+
+    pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
+        self.failover_cooldown = cooldown;
         self
     }
 
@@ -108,16 +122,63 @@ impl HealthMonitor {
             .get_node(&active_id)?
             .ok_or_else(|| HealthError::General(format!("Active node not found: {active_id}")))?;
 
-        let start = std::time::Instant::now();
-        let target_addr = format!("{}:{}", node.server, node.port);
-        let connect_fut = tokio::net::TcpStream::connect(&target_addr);
+        let core_status = self.core_manager.status();
+        let probe_res = if matches!(core_status.lifecycle, CoreLifecycleState::Running) {
+            if core_status.active_core != Some(CoreType::Xray)
+                && core_status.upstream_core.is_none()
+            {
+                let clash_port = core_status
+                    .actual_clash_api_port
+                    .unwrap_or(settings.clash_api_port);
+                let relay_tag = format!("relay-{}", node.id);
+                let mihomo_name = if core_status.active_core == Some(CoreType::Mihomo) {
+                    self.db.list_nodes().ok().and_then(|all_nodes| {
+                        crate::generator::mihomo::resolve_mihomo_proxy_names(&all_nodes)
+                            .remove(&node.id)
+                    })
+                } else {
+                    None
+                };
+                let mut candidates: Vec<&str> = Vec::with_capacity(4);
+                if let Some(ref mname) = mihomo_name {
+                    candidates.push(mname.as_str());
+                }
+                candidates.push(node.id.as_str());
+                candidates.push(node.name.as_str());
+                candidates.push(relay_tag.as_str());
 
-        let (success, latency_ms, err_msg) =
-            match tokio::time::timeout(self.probe_timeout, connect_fut).await {
-                Ok(Ok(_stream)) => (true, Some(start.elapsed().as_millis() as i64), None),
-                Ok(Err(e)) => (false, None, Some(e.to_string())),
-                Err(_) => (false, None, Some("Connection timeout".to_string())),
-            };
+                let clash_res = probe_clash_api_delay(
+                    clash_port,
+                    settings.clash_api_secret.as_deref(),
+                    &candidates,
+                    DEFAULT_LATENCY_TEST_URL,
+                    self.probe_timeout,
+                )
+                .await;
+                if clash_res.is_ok() {
+                    clash_res
+                } else {
+                    let mixed_port = core_status.actual_mixed_port.unwrap_or(settings.mixed_port);
+                    probe_url_via_socks_proxy(
+                        mixed_port,
+                        DEFAULT_LATENCY_TEST_URL,
+                        self.probe_timeout,
+                    )
+                    .await
+                }
+            } else {
+                let mixed_port = core_status.actual_mixed_port.unwrap_or(settings.mixed_port);
+                probe_url_via_socks_proxy(mixed_port, DEFAULT_LATENCY_TEST_URL, self.probe_timeout)
+                    .await
+            }
+        } else {
+            tcp_ping(&node.server, node.port, self.probe_timeout).await
+        };
+
+        let (success, latency_ms, err_msg) = match probe_res {
+            Ok(ms) => (true, Some(ms), None),
+            Err(e) => (false, None, Some(e)),
+        };
 
         let res = HealthCheckResult {
             node_id: node.id.clone(),
@@ -155,6 +216,16 @@ impl HealthMonitor {
         let failures = self.consecutive_failures.load(Ordering::SeqCst);
         if failures < self.max_failures {
             return Ok(None);
+        }
+
+        let cooldown_ms = self.failover_cooldown.as_millis() as i64;
+        if cooldown_ms > 0 {
+            let last_ts = self.last_failover_at.load(Ordering::SeqCst);
+            let now_ts = Utc::now().timestamp_millis();
+            if last_ts > 0 && now_ts.saturating_sub(last_ts) < cooldown_ms {
+                tracing::debug!("Skipping failover evaluation: cooldown still active");
+                return Ok(None);
+            }
         }
 
         let mut settings = self.db.get_app_settings()?;
@@ -207,48 +278,68 @@ impl HealthMonitor {
         // Attempt Clash API hot-switch if running
         let status = self.core_manager.status();
         if matches!(status.lifecycle, CoreLifecycleState::Running) {
-            let hot_res = crate::core::try_smart_hot_switch(
-                settings.clash_api_port,
-                settings.clash_api_secret.as_deref(),
-                &chosen.id,
-                &chosen.name,
-            )
-            .await;
+            let nodes = self.db.list_nodes()?;
+            let groups = self.db.list_groups()?;
+            let dns = self.db.get_dns_settings()?;
+            let routing = self.db.get_routing_settings()?;
 
-            if hot_res.is_err() {
-                // If hot-switch fails, trigger core restart with new config
-                let core = status
-                    .active_core
-                    .or(settings.preferred_core)
-                    .unwrap_or(crate::model::CoreType::SingBox);
-                let nodes = self.db.list_nodes()?;
-                let groups = self.db.list_groups()?;
-                let dns = self.db.get_dns_settings()?;
-                let routing = self.db.get_routing_settings()?;
+            if let Ok(req) = self.core_manager.plan_start_request(
+                None,
+                status.requested_port,
+                Some(settings.allow_lan),
+                Some(settings.auto_port_fallback),
+                &nodes,
+                &groups,
+                &settings,
+                &dns,
+                &routing,
+                Some(&chosen.id),
+            ) {
+                let topology_matches = !self.core_manager.is_config_dirty()
+                    && status.active_core == req.core_type
+                    && status.upstream_core == req.upstream_core_type
+                    && req.upstream_core_type.is_none();
 
-                if let Ok(config_json) = crate::generator::generate_core_config(
-                    core,
-                    &nodes,
-                    &groups,
-                    &settings,
-                    &dns,
-                    &routing,
-                    Some(&chosen.id),
-                ) {
-                    let req = crate::core::CoreStartRequest {
-                        core_type: Some(core),
-                        config_json: Some(config_json),
-                        mixed_port: status.requested_port,
-                        allow_lan: Some(settings.allow_lan),
-                        auto_port_fallback: Some(settings.auto_port_fallback),
-                    };
+                let mut switched_hot = false;
+                if topology_matches {
+                    let clash_port = status
+                        .actual_clash_api_port
+                        .unwrap_or(settings.clash_api_port);
+                    let mihomo_names = crate::generator::mihomo::resolve_mihomo_proxy_names(&nodes);
+                    let mut candidate_storage: Vec<String> = Vec::with_capacity(3);
+                    if matches!(status.active_core, Some(CoreType::Mihomo)) {
+                        if let Some(mname) = mihomo_names.get(&chosen.id) {
+                            candidate_storage.push(mname.clone());
+                        }
+                    }
+                    candidate_storage.push(chosen.id.clone());
+                    candidate_storage.push(chosen.name.clone());
+                    let candidate_refs: Vec<&str> =
+                        candidate_storage.iter().map(String::as_str).collect();
+
+                    if crate::core::try_smart_hot_switch_candidates(
+                        clash_port,
+                        settings.clash_api_secret.as_deref(),
+                        &candidate_refs,
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        switched_hot = true;
+                    }
+                }
+
+                if !switched_hot {
                     let _ = self.core_manager.restart(req).await;
                 }
             }
         }
 
-        // Reset failure counter
+        // Reset failure counter and record failover timestamp for flapping protection
+        self.core_manager.telemetry().record_failover();
         self.consecutive_failures.store(0, Ordering::SeqCst);
+        self.last_failover_at
+            .store(Utc::now().timestamp_millis(), Ordering::SeqCst);
 
         let event = FailoverEvent {
             previous_node_id: active_id,
@@ -262,33 +353,36 @@ impl HealthMonitor {
         Ok(Some(event))
     }
 
-    /// Starts the background health monitor loop
+    /// Asynchronous background health monitor loop (safe to spawn via `tauri::async_runtime::spawn`)
+    pub async fn run_loop(self: Arc<Self>) {
+        self.running.store(true, Ordering::SeqCst);
+        tracing::info!(
+            "Health monitor loop started (interval: {:?})",
+            self.check_interval
+        );
+
+        while self.running.load(Ordering::SeqCst) {
+            tokio::time::sleep(self.check_interval).await;
+            if !self.running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // Only check when the core is actually running
+            let status = self.core_manager.status();
+            if matches!(status.lifecycle, CoreLifecycleState::Running) {
+                let _ = self.check_once().await;
+                let _ = self.evaluate_failover().await;
+            }
+        }
+
+        tracing::info!("Health monitor loop exited");
+    }
+
+    /// Starts the background health monitor loop on an active Tokio runtime
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         self.running.store(true, Ordering::SeqCst);
         let monitor = self.clone();
-
-        tokio::spawn(async move {
-            tracing::info!(
-                "Health monitor loop started (interval: {:?})",
-                monitor.check_interval
-            );
-
-            while monitor.running.load(Ordering::SeqCst) {
-                tokio::time::sleep(monitor.check_interval).await;
-                if !monitor.running.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Only check when the core is actually running
-                let status = monitor.core_manager.status();
-                if matches!(status.lifecycle, CoreLifecycleState::Running) {
-                    let _ = monitor.check_once().await;
-                    let _ = monitor.evaluate_failover().await;
-                }
-            }
-
-            tracing::info!("Health monitor loop exited");
-        })
+        tokio::spawn(monitor.run_loop())
     }
 
     pub fn stop(&self) {
@@ -382,5 +476,56 @@ mod tests {
 
         // Consecutive failures should be reset
         assert_eq!(monitor.get_consecutive_failures(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_health_monitor_cooldown_prevents_flapping() {
+        let db = Database::open_in_memory().unwrap();
+        let core_manager = CoreManager::new(std::env::temp_dir(), std::env::temp_dir());
+
+        let node1 = ProxyNode {
+            id: "flap-1".into(),
+            name: "Flap Node 1".into(),
+            server: "127.0.0.1".into(),
+            port: 19991,
+            protocol: ProtocolType::Vless,
+            tls: None,
+            transport: None,
+            subscription_id: None,
+            group_id: None,
+            settings: ProtocolConfig::Vless(VlessConfig {
+                uuid: "00000000-0000-0000-0000-000000000001".into(),
+                flow: None,
+                encryption: "none".into(),
+                packet_encoding: None,
+            }),
+            latency: Some(100),
+            dialer_proxy: None,
+            preferred_core: None,
+            sort_order: 0,
+        };
+        let mut node2 = node1.clone();
+        node2.id = "flap-2".into();
+        node2.name = "Flap Node 2".into();
+        node2.latency = Some(20);
+
+        db.upsert_node(&node1).unwrap();
+        db.upsert_node(&node2).unwrap();
+        let mut settings = db.get_app_settings().unwrap();
+        settings.active_node_id = Some("flap-1".into());
+        db.save_app_settings(&settings).unwrap();
+
+        let monitor = HealthMonitor::new(db, core_manager)
+            .with_config(Duration::from_millis(50), Duration::from_millis(100), 2)
+            .with_cooldown(Duration::from_secs(60));
+
+        monitor.consecutive_failures.store(2, Ordering::SeqCst);
+        let first = monitor.evaluate_failover().await.unwrap();
+        assert!(first.is_some());
+
+        // Immediate subsequent failure spike within cooldown must not flap again
+        monitor.consecutive_failures.store(5, Ordering::SeqCst);
+        let second = monitor.evaluate_failover().await.unwrap();
+        assert!(second.is_none());
     }
 }

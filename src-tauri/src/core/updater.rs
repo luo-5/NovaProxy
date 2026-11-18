@@ -1,5 +1,6 @@
-use crate::core::process::configure_command_no_window;
+use crate::core::process::{configure_command_no_window, ensure_executable};
 use crate::model::CoreType;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -28,9 +29,11 @@ pub enum UpdaterError {
     BinaryMissingInArchive(String),
     #[error("SHA-256 checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
-    #[error(
-        "New binary for {core} failed verification ({reason}); rolled back to previous binary"
-    )]
+    #[error("Archive error: {0}")]
+    Archive(String),
+    #[error("Unsupported operation on this platform: {0}")]
+    UnsupportedOnPlatform(String),
+    #[error("Verification failed and rolled back to previous binary for {core}: {reason}")]
     VerificationFailedRolledBack { core: CoreType, reason: String },
 }
 
@@ -61,6 +64,15 @@ pub struct CoreUpdateResult {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CoreBinaryStatus {
+    pub core: CoreType,
+    pub installed: bool,
+    pub installed_version: Option<String>,
+    pub lock_version: Option<String>,
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
     tag_name: String,
@@ -76,7 +88,7 @@ struct GithubAsset {
 /// Builds a `reqwest::Client` optionally routed through the current local proxy
 pub fn build_http_client(proxy_url: Option<&str>) -> Result<reqwest::Client, UpdaterError> {
     let mut builder = reqwest::Client::builder()
-        .user_agent("NovaProxy-CoreUpdater/0.1.0")
+        .user_agent(concat!("NovaProxy-CoreUpdater/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(60));
 
     if let Some(raw_proxy) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
@@ -108,6 +120,7 @@ pub async fn verify_core_binary_exec(core: CoreType, binary_path: &Path) -> Resu
     if !binary_path.exists() {
         return Err(format!("Binary does not exist: {}", binary_path.display()));
     }
+    ensure_executable(binary_path);
 
     let mut cmd = Command::new(binary_path);
     configure_command_no_window(&mut cmd);
@@ -165,7 +178,7 @@ pub async fn apply_binary_update_with_rollback(
         std::fs::create_dir_all(parent)?;
     }
 
-    let backup_path = target_binary.with_extension("exe.bak");
+    let backup_path = PathBuf::from(format!("{}.bak", target_binary.display()));
     let had_existing = target_binary.exists();
 
     if had_existing {
@@ -210,12 +223,39 @@ fn github_repo_for_core(core: CoreType) -> &'static str {
     }
 }
 
-fn select_windows_asset(core: CoreType, assets: &[GithubAsset]) -> Option<&GithubAsset> {
-    match core {
-        CoreType::SingBox => assets
+fn select_platform_asset(core: CoreType, assets: &[GithubAsset]) -> Option<&GithubAsset> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    match (core, os, arch) {
+        // ---- sing-box ----
+        (CoreType::SingBox, "windows", "x86_64") => assets
             .iter()
             .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-windows-amd64.zip")),
-        CoreType::Mihomo => assets
+        (CoreType::SingBox, "windows", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-windows-arm64.zip")),
+        (CoreType::SingBox, "macos", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-darwin-arm64.tar.gz")),
+        (CoreType::SingBox, "macos", "x86_64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-darwin-amd64.tar.gz")),
+        (CoreType::SingBox, "linux", "x86_64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-linux-amd64.tar.gz")),
+        (CoreType::SingBox, "linux", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-linux-arm64.tar.gz")),
+        (CoreType::SingBox, "android", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-android-arm64.tar.gz")),
+        (CoreType::SingBox, "android", "x86_64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("sing-box-") && a.name.ends_with("-android-amd64.tar.gz")),
+
+        // ---- mihomo ----
+        (CoreType::Mihomo, "windows", "x86_64") => assets
             .iter()
             .find(|a| {
                 a.name.starts_with("mihomo-windows-amd64-compatible-") && a.name.ends_with(".zip")
@@ -225,7 +265,78 @@ fn select_windows_asset(core: CoreType, assets: &[GithubAsset]) -> Option<&Githu
                     a.name.starts_with("mihomo-windows-amd64-") && a.name.ends_with(".zip")
                 })
             }),
-        CoreType::Xray => assets.iter().find(|a| a.name == "Xray-windows-64.zip"),
+        (CoreType::Mihomo, "windows", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("mihomo-windows-arm64-") && a.name.ends_with(".zip")),
+        (CoreType::Mihomo, "macos", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("mihomo-darwin-arm64-v") && a.name.ends_with(".gz"))
+            .or_else(|| {
+                assets
+                    .iter()
+                    .find(|a| a.name.starts_with("mihomo-darwin-arm64-") && a.name.ends_with(".gz"))
+            }),
+        (CoreType::Mihomo, "macos", "x86_64") => assets
+            .iter()
+            .find(|a| {
+                a.name.starts_with("mihomo-darwin-amd64-compatible-") && a.name.ends_with(".gz")
+            })
+            .or_else(|| {
+                assets
+                    .iter()
+                    .find(|a| a.name.starts_with("mihomo-darwin-amd64-") && a.name.ends_with(".gz"))
+            }),
+        (CoreType::Mihomo, "linux", "x86_64") => assets
+            .iter()
+            .find(|a| {
+                a.name.starts_with("mihomo-linux-amd64-compatible-") && a.name.ends_with(".gz")
+            })
+            .or_else(|| {
+                assets
+                    .iter()
+                    .find(|a| a.name.starts_with("mihomo-linux-amd64-") && a.name.ends_with(".gz"))
+            }),
+        (CoreType::Mihomo, "linux", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("mihomo-linux-arm64-v") && a.name.ends_with(".gz"))
+            .or_else(|| {
+                assets
+                    .iter()
+                    .find(|a| a.name.starts_with("mihomo-linux-arm64-") && a.name.ends_with(".gz"))
+            }),
+        (CoreType::Mihomo, "android", "aarch64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("mihomo-android-arm64-v8-") && a.name.ends_with(".gz")),
+        (CoreType::Mihomo, "android", "x86_64") => assets
+            .iter()
+            .find(|a| a.name.starts_with("mihomo-android-amd64-") && a.name.ends_with(".gz")),
+
+        // ---- xray ----
+        (CoreType::Xray, "windows", "x86_64") => {
+            assets.iter().find(|a| a.name == "Xray-windows-64.zip")
+        }
+        (CoreType::Xray, "windows", "aarch64") => assets
+            .iter()
+            .find(|a| a.name == "Xray-windows-arm64-v8a.zip"),
+        (CoreType::Xray, "macos", "aarch64") => {
+            assets.iter().find(|a| a.name == "Xray-macos-arm64-v8a.zip")
+        }
+        (CoreType::Xray, "macos", "x86_64") => {
+            assets.iter().find(|a| a.name == "Xray-macos-64.zip")
+        }
+        (CoreType::Xray, "linux", "x86_64") => {
+            assets.iter().find(|a| a.name == "Xray-linux-64.zip")
+        }
+        (CoreType::Xray, "linux", "aarch64") => {
+            assets.iter().find(|a| a.name == "Xray-linux-arm64-v8a.zip")
+        }
+        (CoreType::Xray, "android", "aarch64") => assets
+            .iter()
+            .find(|a| a.name == "Xray-android-arm64-v8a.zip"),
+        (CoreType::Xray, "android", "x86_64") => {
+            assets.iter().find(|a| a.name == "Xray-android-amd64.zip")
+        }
+        _ => None,
     }
 }
 
@@ -281,7 +392,7 @@ impl CoreUpdater {
             .json()
             .await?;
 
-        let asset = select_windows_asset(core, &release.assets).ok_or_else(|| {
+        let asset = select_platform_asset(core, &release.assets).ok_or_else(|| {
             UpdaterError::AssetNotFound {
                 core,
                 tag: release.tag_name.clone(),
@@ -306,38 +417,95 @@ impl CoreUpdater {
         })
     }
 
-    /// Downloads, extracts, verifies, and atomically installs a core update with rollback on failure
-    pub async fn update_core(
+    pub fn cores_dir(&self) -> &Path {
+        &self.cores_dir
+    }
+
+    /// Queries actual executable versions on disk alongside `cores.lock.json` metadata.
+    pub async fn get_installed_statuses(&self) -> Vec<CoreBinaryStatus> {
+        let lock_map = self.read_lock_file();
+        let mut statuses = Vec::with_capacity(3);
+        for core in [CoreType::SingBox, CoreType::Mihomo, CoreType::Xray] {
+            let bin = self.cores_dir.join(core.binary_name());
+            let installed = bin.exists();
+            let installed_version = if installed {
+                verify_core_binary_exec(core, &bin).await.ok()
+            } else {
+                None
+            };
+            let lock_entry = lock_map.get(core.as_str());
+            statuses.push(CoreBinaryStatus {
+                core,
+                installed,
+                installed_version,
+                lock_version: lock_entry.map(|e| e.version.clone()),
+                sha256: lock_entry.map(|e| e.sha256.clone()),
+            });
+        }
+        statuses
+    }
+
+    /// Downloads & extracts a candidate binary update to temp staging BEFORE stopping the live core
+    /// (allowing the download itself to traverse the currently running local proxy).
+    pub async fn download_core_candidate(
         &self,
         core: CoreType,
         proxy_url: Option<&str>,
+    ) -> Result<(CoreUpdateCheckResult, PathBuf), UpdaterError> {
+        #[cfg(target_os = "android")]
+        {
+            let _ = (core, proxy_url);
+            Err(UpdaterError::UnsupportedOnPlatform(
+                "In-app binary replacement on Android is restricted by W^X; update via APK release"
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let check = self.check_for_update(core, proxy_url).await?;
+            let client = build_http_client(proxy_url)?;
+
+            let bytes = client
+                .get(&check.download_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+
+            let temp_dir = std::env::temp_dir().join("novaproxy_updater");
+            std::fs::create_dir_all(&temp_dir)?;
+            let archive_path = temp_dir.join(&check.asset_name);
+            std::fs::write(&archive_path, &bytes)?;
+
+            let ext_suffix = if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            };
+            let candidate_path =
+                temp_dir.join(format!("{}.candidate{}", core.as_str(), ext_suffix));
+            extract_binary_from_archive(&archive_path, core, &candidate_path)?;
+            ensure_executable(&candidate_path);
+            let _ = std::fs::remove_file(&archive_path);
+            Ok((check, candidate_path))
+        }
+    }
+
+    /// Installs a previously staged candidate binary, verifies it, and updates `cores.lock.json`.
+    pub async fn finalize_candidate_update(
+        &self,
+        core: CoreType,
+        check: CoreUpdateCheckResult,
+        candidate_path: &Path,
         expected_sha256: Option<&str>,
     ) -> Result<CoreUpdateResult, UpdaterError> {
-        let check = self.check_for_update(core, proxy_url).await?;
-        let client = build_http_client(proxy_url)?;
-
-        let bytes = client
-            .get(&check.download_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-
-        let temp_dir = std::env::temp_dir().join("novaproxy_updater");
-        std::fs::create_dir_all(&temp_dir)?;
-        let zip_path = temp_dir.join(&check.asset_name);
-        std::fs::write(&zip_path, &bytes)?;
-
-        let candidate_path = temp_dir.join(format!("{}.candidate.exe", core.as_str()));
-        extract_exe_from_zip(&zip_path, core, &candidate_path)?;
-        let _ = std::fs::remove_file(&zip_path);
-
         let target_binary = self.cores_dir.join(core.binary_name());
         let sha256 = apply_binary_update_with_rollback(
             core,
             &target_binary,
-            &candidate_path,
+            candidate_path,
             expected_sha256,
         )
         .await?;
@@ -360,32 +528,99 @@ impl CoreUpdater {
             sha256,
         })
     }
+
+    /// Downloads, extracts, verifies, and atomically installs a core update with rollback on failure
+    pub async fn update_core(
+        &self,
+        core: CoreType,
+        proxy_url: Option<&str>,
+        expected_sha256: Option<&str>,
+    ) -> Result<CoreUpdateResult, UpdaterError> {
+        let (check, candidate_path) = self.download_core_candidate(core, proxy_url).await?;
+        self.finalize_candidate_update(core, check, &candidate_path, expected_sha256)
+            .await
+    }
 }
 
-fn extract_exe_from_zip(
-    zip_path: &Path,
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn extract_binary_from_archive(
+    archive_path: &Path,
     core: CoreType,
-    dest_exe: &Path,
+    dest_bin: &Path,
 ) -> Result<(), UpdaterError> {
-    let file = std::fs::File::open(zip_path)?;
+    let lower_name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if lower_name.ends_with(".tar.gz") || lower_name.ends_with(".tgz") {
+        let file = std::fs::File::open(archive_path)?;
+        let gz = GzDecoder::new(file);
+        let mut tar_arch = tar::Archive::new(gz);
+        let expected_stem = core.as_str().to_ascii_lowercase();
+        let entries = tar_arch
+            .entries()
+            .map_err(|e| UpdaterError::Archive(e.to_string()))?;
+        for entry_res in entries {
+            let mut entry = entry_res.map_err(|e| UpdaterError::Archive(e.to_string()))?;
+            let path = entry
+                .path()
+                .map_err(|e| UpdaterError::Archive(e.to_string()))?;
+            let fname = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if fname == expected_stem || fname == core.binary_name().to_ascii_lowercase() {
+                let mut out = std::fs::File::create(dest_bin)?;
+                std::io::copy(&mut entry, &mut out)?;
+                ensure_executable(dest_bin);
+                return Ok(());
+            }
+        }
+        return Err(UpdaterError::BinaryMissingInArchive(
+            core.binary_name().to_string(),
+        ));
+    }
+
+    if lower_name.ends_with(".gz") {
+        let file = std::fs::File::open(archive_path)?;
+        let mut gz = GzDecoder::new(file);
+        let mut out = std::fs::File::create(dest_bin)?;
+        std::io::copy(&mut gz, &mut out)?;
+        ensure_executable(dest_bin);
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let expected_name = core.binary_name();
+    let expected_name = core.binary_name().to_ascii_lowercase();
+    let expected_stem = core.as_str().to_ascii_lowercase();
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_ascii_lowercase();
-        if name.ends_with(&expected_name.to_ascii_lowercase()) || name.ends_with(".exe") {
-            let mut out = std::fs::File::create(dest_exe)?;
+        let fname = Path::new(entry.name())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if fname == expected_name
+            || fname == expected_stem
+            || (cfg!(target_os = "windows") && fname.ends_with(".exe"))
+        {
+            let mut out = std::fs::File::create(dest_bin)?;
             std::io::copy(&mut entry, &mut out)?;
+            ensure_executable(dest_bin);
             return Ok(());
         }
     }
 
     Err(UpdaterError::BinaryMissingInArchive(
-        expected_name.to_string(),
+        core.binary_name().to_string(),
     ))
 }
 
@@ -427,7 +662,7 @@ mod tests {
         let restored_bytes = std::fs::read(&target_bin).unwrap();
         assert_eq!(restored_bytes, original_bytes);
         assert!(!corrupted_candidate.exists());
-        assert!(!target_bin.with_extension("exe.bak").exists());
+        assert!(!PathBuf::from(format!("{}.bak", target_bin.display())).exists());
     }
 
     #[tokio::test]

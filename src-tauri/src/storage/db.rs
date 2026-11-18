@@ -227,6 +227,8 @@ impl Database {
 
     pub fn delete_subscription(&self, id: &str) -> StorageResult<bool> {
         let conn = self.conn.lock();
+        let group_prefix = format!("sub:{id}:%");
+        conn.execute("DELETE FROM groups WHERE id LIKE ?1", params![group_prefix])?;
         let affected = conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?;
         Ok(affected > 0)
     }
@@ -314,6 +316,90 @@ impl Database {
         let conn = self.conn.lock();
         let affected = conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
         Ok(affected > 0)
+    }
+
+    /// Remaps parsed group `node_ids` against persisted node IDs (via node fingerprint),
+    /// removes stale subscription-scoped groups on refresh, and persists surviving groups.
+    pub fn sync_groups(
+        &self,
+        subscription_id: Option<&str>,
+        parsed_nodes: &[ProxyNode],
+        saved_nodes: &[ProxyNode],
+        raw_groups: Vec<NodeGroup>,
+    ) -> StorageResult<Vec<NodeGroup>> {
+        let mut saved_by_fp: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(saved_nodes.len());
+        for node in saved_nodes {
+            saved_by_fp.insert(node.compute_fingerprint(), node.id.clone());
+        }
+
+        let mut id_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(parsed_nodes.len());
+        for node in parsed_nodes {
+            let fp = node.compute_fingerprint();
+            if let Some(saved_id) = saved_by_fp.get(&fp) {
+                id_map.insert(node.id.clone(), saved_id.clone());
+            }
+        }
+
+        let mut synced = Vec::with_capacity(raw_groups.len());
+        for mut grp in raw_groups {
+            if let Some(sub_id) = subscription_id {
+                let prefix = format!("sub:{sub_id}:");
+                if !grp.id.starts_with(&prefix) {
+                    grp.id = format!("{prefix}{}", grp.id);
+                }
+            }
+
+            let mut seen_ids = std::collections::HashSet::new();
+            let mut mapped_ids = Vec::with_capacity(grp.node_ids.len());
+            for nid in grp.node_ids {
+                let mapped = id_map.get(&nid).cloned().unwrap_or(nid);
+                if saved_nodes.iter().any(|s| s.id == mapped) && seen_ids.insert(mapped.clone()) {
+                    mapped_ids.push(mapped);
+                }
+            }
+
+            if !mapped_ids.is_empty() {
+                grp.node_ids = mapped_ids;
+                synced.push(grp);
+            }
+        }
+
+        {
+            let mut conn = self.conn.lock();
+            let tx = conn.transaction()?;
+            if let Some(sub_id) = subscription_id {
+                let group_prefix = format!("sub:{sub_id}:%");
+                tx.execute("DELETE FROM groups WHERE id LIKE ?1", params![group_prefix])?;
+            }
+            for grp in &synced {
+                let node_ids_json = serde_json::to_string(&grp.node_ids)?;
+                tx.execute(
+                    "INSERT INTO groups (id, name, group_type, node_ids_json, test_url, interval_secs, sort_order)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        group_type = excluded.group_type,
+                        node_ids_json = excluded.node_ids_json,
+                        test_url = excluded.test_url,
+                        interval_secs = excluded.interval_secs,
+                        sort_order = excluded.sort_order",
+                    params![
+                        grp.id,
+                        grp.name,
+                        grp.group_type.as_str(),
+                        node_ids_json,
+                        grp.test_url,
+                        grp.interval_secs,
+                        grp.sort_order,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+        }
+
+        Ok(synced)
     }
 
     fn map_group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeGroup> {
@@ -1016,5 +1102,81 @@ mod tests {
         assert!(db.get_node("node-1").unwrap().is_none());
         assert!(db.get_latency_history("node-1", 10).unwrap().is_empty());
         assert!(db.get_node("node-2").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_sync_groups_remaps_dedup_ids_and_cleans_stale_subscription_groups() {
+        let db = Database::open_in_memory().unwrap();
+        let sub = Subscription {
+            id: "sub-grp".to_string(),
+            name: "Group Sub".to_string(),
+            url: "https://example.invalid/sub-grp".to_string(),
+            enabled: true,
+            user_agent: None,
+            update_interval_mins: None,
+            use_proxy: false,
+            updated_at: None,
+            upload: None,
+            download: None,
+            total: None,
+            expire: None,
+            home_url: None,
+            sort_order: 0,
+        };
+        db.upsert_subscription(&sub).unwrap();
+
+        let existing = sample_node("db-id-1", Some("sub-grp"));
+        db.sync_subscription_nodes("sub-grp", vec![existing.clone()])
+            .unwrap();
+
+        let mut reparsed = sample_node("fresh-parser-id", Some("sub-grp"));
+        reparsed.name = "Fresh Name".to_string();
+        let saved = db
+            .sync_subscription_nodes("sub-grp", vec![reparsed.clone()])
+            .unwrap();
+        assert_eq!(saved[0].id, "db-id-1");
+
+        let stale = NodeGroup {
+            id: "sub:sub-grp:old-grp".to_string(),
+            name: "Old Stale Group".to_string(),
+            group_type: GroupType::Selector,
+            node_ids: vec!["db-id-1".to_string()],
+            test_url: None,
+            interval_secs: None,
+            sort_order: 0,
+        };
+        db.upsert_group(&stale).unwrap();
+
+        let incoming_groups = vec![
+            NodeGroup {
+                id: "auto-grp".to_string(),
+                name: "Auto Best".to_string(),
+                group_type: GroupType::UrlTest,
+                node_ids: vec!["fresh-parser-id".to_string()],
+                test_url: Some("https://www.gstatic.com/generate_204".to_string()),
+                interval_secs: Some(300),
+                sort_order: 0,
+            },
+            NodeGroup {
+                id: "empty-grp".to_string(),
+                name: "Empty".to_string(),
+                group_type: GroupType::Fallback,
+                node_ids: vec!["non-existent".to_string()],
+                test_url: None,
+                interval_secs: None,
+                sort_order: 1,
+            },
+        ];
+
+        let synced = db
+            .sync_groups(Some("sub-grp"), &[reparsed], &saved, incoming_groups)
+            .unwrap();
+        assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].id, "sub:sub-grp:auto-grp");
+        assert_eq!(synced[0].node_ids, vec!["db-id-1".to_string()]);
+        assert!(db.get_group("sub:sub-grp:old-grp").unwrap().is_none());
+
+        assert!(db.delete_subscription("sub-grp").unwrap());
+        assert!(db.get_group("sub:sub-grp:auto-grp").unwrap().is_none());
     }
 }

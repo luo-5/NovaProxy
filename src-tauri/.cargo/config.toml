@@ -1,3 +1,3 @@
-[build]
-target = "x86_64-pc-windows-gnu"
-target-dir = "C:/Users/31752/.cargo/target_novaproxy"
+# Cross-platform builds should rely on each host's active Rust toolchain rather than pinning a
+# Windows target or user-specific path here. When building inside a non-ASCII workspace path on
+# Windows, scripts/build.ps1 sets CARGO_TARGET_DIR to an ASCII path automatically.

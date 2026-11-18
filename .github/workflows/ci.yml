@@ -10,64 +10,169 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check-and-test:
-    name: Lint, Test & Validate
-    runs-on: windows-latest
-
+  frontend:
+    name: Frontend Lint, Typecheck & Test
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js & pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 11
 
-      - name: Setup Node Environment
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: "pnpm"
 
-      - name: Install Frontend Dependencies
-        run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm test
+      - run: pnpm build
 
-      - name: Frontend Code Style (ESLint)
-        run: pnpm lint
+  rust-desktop:
+    name: Desktop Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: amd64
+          - os: ubuntu-latest
+            platform: linux
+            arch: amd64
+          - os: macos-latest
+            platform: macos
+            arch: arm64
 
-      - name: Frontend Typecheck (tsc)
-        run: pnpm tsc --noEmit
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Frontend Unit Tests (Vitest)
-        run: pnpm test
+      - name: Install Linux Tauri System Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Frontend Production Build
-        run: pnpm build
-
-      - name: Setup Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
         with:
-          targets: x86_64-pc-windows-msvc
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
           components: rustfmt, clippy
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Rust Code Formatting Check
+      - name: Rust Formatting Check
+        if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         run: cargo fmt --check
 
       - name: Rust Clippy Strict Check
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Fetch Cores Binaries
+      - name: Fetch Windows Core Binaries
+        if: matrix.os == 'windows-latest'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-cores.ps1 -Platform windows -Arch amd64
+
+      - name: Fetch Unix Core Binaries
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./scripts/fetch-cores.ps1
+          chmod +x scripts/fetch-cores.sh
+          ./scripts/fetch-cores.sh --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
 
       - name: Run Backend Unit & Integration Tests
         working-directory: src-tauri
-        run: cargo test --verbose
+        run: cargo test --verbose -- --test-threads=4
+
+  android-build:
+    name: Android NDK & APK Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platforms & NDK
+        run: |
+          sdkmanager "platforms;android-35" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Initialize & Configure Android Project
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        run: |
+          pnpm tauri android init --ci --skip-targets-install
+          node scripts/configure-android.mjs
+
+      - name: Android Rust Clippy & Check
+        working-directory: src-tauri
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+          CC_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          AR_aarch64_linux_android: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CC_x86_64_linux_android: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang
+          CXX_x86_64_linux_android: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang++
+          AR_x86_64_linux_android: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang
+        run: |
+          cargo clippy --target aarch64-linux-android --lib -- -D warnings
+          cargo check --target x86_64-linux-android --lib
+
+      - name: Fetch Android Proxy Cores & Build Debug APK
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        run: |
+          chmod +x scripts/fetch-cores.sh
+          ./scripts/fetch-cores.sh --platform android --arch arm64
+          ./scripts/fetch-cores.sh --platform android --arch amd64
+          pnpm tauri android build --apk --debug -t aarch64 -t x86_64

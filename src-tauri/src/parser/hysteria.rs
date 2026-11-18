@@ -231,7 +231,15 @@ pub fn parse_v2(uri: &str) -> ParseResult<ProxyNode> {
     let hop_interval = params
         .get("hop_interval")
         .or_else(|| params.get("hop-interval"))
-        .and_then(|v| v.parse::<u32>().ok());
+        .and_then(|v| {
+            let trimmed = v.trim();
+            trimmed
+                .strip_suffix('s')
+                .or_else(|| trimmed.strip_suffix('S'))
+                .unwrap_or(trimmed)
+                .parse::<u32>()
+                .ok()
+        });
 
     let up_mbps = params
         .get("upmbps")
@@ -267,10 +275,10 @@ pub fn parse_v2(uri: &str) -> ParseResult<ProxyNode> {
         insecure,
         alpn,
         fingerprint: params
-            .get("pinSHA256")
-            .or_else(|| params.get("fp"))
-            .filter(|s| !s.is_empty())
-            .cloned(),
+            .get("fp")
+            .or_else(|| params.get("fingerprint"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         reality: None,
         ech_config: None,
         fragment: None,
@@ -328,7 +336,7 @@ pub fn to_uri_v2(node: &ProxyNode) -> ParseResult<String> {
         }
         if let Some(ref fp) = tls.fingerprint {
             if !fp.is_empty() {
-                pairs.push(("pinSHA256", fp.clone()));
+                pairs.push(("fp", fp.clone()));
             }
         }
     }

@@ -205,7 +205,7 @@ fn test_network_listener_thread_lifecycle() {
     let sysproxy = SystemProxyManager::new();
     let listener = Arc::new(NetworkChangeListener::new(sysproxy));
 
-    let handle = listener.clone().start();
+    let handle = listener.clone().start().expect("spawn network listener");
     assert!(listener.is_running());
 
     std::thread::sleep(Duration::from_millis(30));

@@ -2,37 +2,63 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
+  CoreBinaryStatus,
   CoreLogEntry,
   CoreStartRequest,
   CoreStatusInfo,
   CoreType,
+  CoreUpdateCheckResult,
+  CoreUpdateResult,
+  DiagnosticBundleResult,
   DnsSettings,
+  LatencyTestMode,
+  LogFileInfo,
+  LogLevel,
+  NodeGroup,
+  PlatformInfo,
   ProxyNode,
   RoutingSettings,
   RuleItem,
+  ServiceState,
   Subscription,
   SubscriptionParseReport,
   SysProxySnapshot,
+  TelemetrySummary,
+  UrlSchemeStatus,
+  WintunStatus,
 } from "../types/bindings";
 
 export type {
   AppSettings,
   CapabilityRule,
+  CoreBinaryStatus,
   CoreCapabilities,
   CoreLifecycleState,
   CoreLogEntry,
   CoreSelection,
   CoreStartRequest,
+  CoreStartSample,
   CoreStatusInfo,
   CoreType,
+  CoreUpdateCheckResult,
+  CoreUpdateResult,
+  CrashSample,
+  DiagnosticBundleResult,
   DnsSettings,
   DnsStrategy,
+  FrontendErrorSample,
   GroupType,
+  InsightSeverity,
   LatencyRecord,
+  LatencyTestMode,
+  LogFileInfo,
   LogLevel,
   LogStream,
   NodeGroup,
+  OptimizationInsight,
+  PlatformInfo,
   ProtocolConfig,
+  ProtocolLatencyStats,
   ProtocolType,
   ProxyNode,
   RoutingMode,
@@ -40,22 +66,39 @@ export type {
   RuleAction,
   RuleItem,
   RuleType,
+  ServiceState,
   Subscription,
   SubscriptionFormat,
   SubscriptionParseReport,
   SubscriptionUserInfo,
   SysProxySnapshot,
+  TelemetrySummary,
   TlsConfig,
+  TrafficSnapshot,
   TransportConfig,
   TransportKind,
   TunSettings,
+  UrlSchemeStatus,
+  WintunStatus,
 } from "../types/bindings";
+
+export interface AndroidVpnStatus {
+  running: boolean;
+  prepared: boolean;
+  nativeLibDir: string | null;
+  rxBytes: number;
+  txBytes: number;
+}
 
 /**
  * Type-safe Tauri IPC wrapper
  */
 export async function getAppVersion(): Promise<string> {
   return await invoke<string>("get_app_version");
+}
+
+export async function getPlatformInfo(): Promise<PlatformInfo> {
+  return await invoke<PlatformInfo>("get_platform_info");
 }
 
 export async function getCoreDefaultConfig(mixedPort?: number): Promise<string> {
@@ -307,12 +350,30 @@ export async function saveAppSettings(
   return await invoke<AppSettings>("save_app_settings", { settings });
 }
 
-export async function testNodeLatency(id: string): Promise<number | null> {
-  return await invoke<number | null>("test_node_latency", { id });
+export async function testNodeLatency(
+  id: string,
+  mode?: LatencyTestMode,
+  testUrl?: string
+): Promise<number | null> {
+  return await invoke<number | null>("test_node_latency", {
+    id,
+    mode,
+    testUrl,
+  });
 }
 
-export async function testAllNodesLatency(): Promise<[string, number | null][]> {
-  return await invoke<[string, number | null][]>("test_all_nodes_latency");
+export async function testAllNodesLatency(
+  mode?: LatencyTestMode,
+  testUrl?: string
+): Promise<[string, number | null][]> {
+  return await invoke<[string, number | null][]>("test_all_nodes_latency", {
+    mode,
+    testUrl,
+  });
+}
+
+export async function listGroups(): Promise<NodeGroup[]> {
+  return await invoke<NodeGroup[]>("list_groups");
 }
 
 export async function selectActiveNode(id: string): Promise<void> {
@@ -341,4 +402,93 @@ export async function backupDatabase(targetPath: string): Promise<void> {
 
 export async function exportDiagnosticsReport(): Promise<Record<string, unknown>> {
   return await invoke<Record<string, unknown>>("export_diagnostics_report");
+}
+
+export async function getTelemetrySummary(): Promise<TelemetrySummary> {
+  return await invoke<TelemetrySummary>("get_telemetry_summary");
+}
+
+export async function getLogFiles(): Promise<LogFileInfo[]> {
+  return await invoke<LogFileInfo[]>("get_log_files");
+}
+
+export async function readLogFile(
+  fileName: string,
+  tailLines?: number
+): Promise<string> {
+  return await invoke<string>("read_log_file", { fileName, tailLines });
+}
+
+export async function logFrontendEvent(
+  level: LogLevel,
+  component: string,
+  message: string
+): Promise<void> {
+  await invoke<void>("log_frontend_event", {
+    level,
+    component,
+    message,
+  }).catch(() => {});
+}
+
+export async function exportDiagnosticBundle(): Promise<DiagnosticBundleResult> {
+  return await invoke<DiagnosticBundleResult>("export_diagnostic_bundle");
+}
+
+export async function prepareAndroidVpn(): Promise<boolean> {
+  return await invoke<boolean>("prepare_android_vpn");
+}
+
+export async function getAndroidVpnStatus(): Promise<AndroidVpnStatus> {
+  return await invoke<AndroidVpnStatus>("get_android_vpn_status");
+}
+
+export async function getServiceStatus(): Promise<ServiceState> {
+  return await invoke<ServiceState>("get_service_status");
+}
+
+export async function checkWintunStatus(): Promise<WintunStatus> {
+  return await invoke<WintunStatus>("check_wintun_status");
+}
+
+export async function getUrlSchemeStatus(): Promise<UrlSchemeStatus> {
+  return await invoke<UrlSchemeStatus>("get_url_scheme_status");
+}
+
+export async function setClashUrlScheme(enabled: boolean): Promise<UrlSchemeStatus> {
+  return await invoke<UrlSchemeStatus>("set_clash_url_scheme", { enabled });
+}
+
+export async function getCoreVersions(): Promise<CoreBinaryStatus[]> {
+  return await invoke<CoreBinaryStatus[]>("get_core_versions");
+}
+
+export async function checkCoreUpdate(
+  core: CoreType,
+  useProxy?: boolean
+): Promise<CoreUpdateCheckResult> {
+  return await invoke<CoreUpdateCheckResult>("check_core_update", {
+    core,
+    useProxy,
+  });
+}
+
+export async function installCoreUpdate(
+  core: CoreType,
+  useProxy?: boolean,
+  expectedSha256?: string
+): Promise<CoreUpdateResult> {
+  return await invoke<CoreUpdateResult>("install_core_update", {
+    core,
+    useProxy,
+    expectedSha256,
+  });
+}
+
+export function onDeepLinkImport(
+  handler: (sub: Subscription) => void
+): Promise<UnlistenFn> {
+  return listen<Subscription>("app://deep-link", (event) => {
+    handler(event.payload);
+  });
 }

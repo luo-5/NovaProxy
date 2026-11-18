@@ -1,12 +1,13 @@
 //! sing-box 1.14 configuration generator
 
-use crate::generator::dns::generate_singbox_dns;
-use crate::generator::routing::generate_singbox_route;
+use crate::generator::dns::generate_singbox_dns_for_routing;
+use crate::generator::routing::generate_singbox_route_with_options;
 use crate::model::node::{ProtocolConfig, ProxyNode, RealityConfig, TlsConfig, TransportConfig};
 use crate::model::routing::{DnsSettings, RoutingSettings};
-use crate::model::settings::AppSettings;
+use crate::model::settings::{AppSettings, RoutingMode};
 use crate::model::subscription::{GroupType, NodeGroup};
 use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -53,7 +54,10 @@ pub fn generate_singbox_config(
     );
 
     // 3. DNS section
-    root.insert("dns".to_string(), generate_singbox_dns(dns));
+    root.insert(
+        "dns".to_string(),
+        generate_singbox_dns_for_routing(dns, routing),
+    );
 
     // 4. Inbounds section
     let listen_host = if settings.allow_lan {
@@ -65,11 +69,15 @@ pub fn generate_singbox_config(
     let mut inbounds = Vec::new();
 
     if settings.tun_mode {
+        let mut tun_addrs = vec!["172.19.0.1/30"];
+        if settings.ipv6 && !dns.disable_ipv6 {
+            tun_addrs.push("fdfe:dcba:9876::1/126");
+        }
         inbounds.push(json!({
             "type": "tun",
             "tag": "tun-in",
             "interface_name": "NovaProxy-TUN",
-            "address": ["172.19.0.1/30"],
+            "address": tun_addrs,
             "auto_route": true,
             "strict_route": true,
             "stack": "system"
@@ -110,10 +118,35 @@ pub fn generate_singbox_config(
     let mut endpoints = Vec::new();
     let mut outbounds = Vec::new();
     let mut all_proxy_tags = Vec::new();
+    let mut seen_tags = HashSet::new();
 
-    // First collect wireguard endpoints vs standard outbounds
+    // First collect wireguard endpoints vs standard outbounds.
+    // Precompute all runnable sing-box tags so `detour` (`dialer_proxy`) never references
+    // a missing/unsupported outbound tag or self-loops.
+    let runnable_tags: HashSet<String> = nodes
+        .iter()
+        .filter(|n| {
+            !matches!(
+                n.settings,
+                ProtocolConfig::ShadowsocksR(_)
+                    | ProtocolConfig::Snell(_)
+                    | ProtocolConfig::Mieru(_)
+            )
+        })
+        .map(|n| n.id.clone())
+        .collect();
+    let name_to_tag: HashMap<String, String> = nodes
+        .iter()
+        .filter(|n| runnable_tags.contains(&n.id))
+        .map(|n| (n.name.trim().to_string(), n.id.clone()))
+        .collect();
+
     for node in nodes {
+        let is_active = active_node_id == Some(node.id.as_str());
         if let ProtocolConfig::WireGuard(wg) = &node.settings {
+            if !seen_tags.insert(node.id.clone()) {
+                continue;
+            }
             let mut peers = Vec::new();
             let mut peer_obj = json!({
                 "address": node.server,
@@ -129,7 +162,7 @@ pub fn generate_singbox_config(
             }
             peers.push(peer_obj);
 
-            let ep = json!({
+            let mut ep = json!({
                 "type": "wireguard",
                 "tag": node.id,
                 "address": wg.local_address,
@@ -137,14 +170,27 @@ pub fn generate_singbox_config(
                 "peers": peers,
                 "mtu": wg.mtu.unwrap_or(1408)
             });
+            apply_detour_if_any(&mut ep, node, &runnable_tags, &name_to_tag);
             endpoints.push(ep);
             all_proxy_tags.push(node.id.clone());
-        } else {
-            let (node_outbounds, primary_tag) = compile_singbox_outbound(node);
+        } else if let Some((node_outbounds, primary_tag)) =
+            compile_singbox_outbound(node, &runnable_tags, &name_to_tag)
+        {
+            if !seen_tags.insert(primary_tag.clone()) {
+                continue;
+            }
             for ob in node_outbounds {
                 outbounds.push(ob);
             }
             all_proxy_tags.push(primary_tag);
+        } else if is_active && routing.mode != RoutingMode::Direct {
+            return Err(SingBoxGeneratorError::InvalidNodeConfig(
+                node.name.clone(),
+                format!(
+                    "protocol '{}' is not supported natively by sing-box",
+                    node.protocol
+                ),
+            ));
         }
     }
 
@@ -212,12 +258,14 @@ pub fn generate_singbox_config(
 
     // Top-level "proxy" selector group
     let mut main_selector_outbounds = Vec::new();
+    let mut default_outbound: Option<String> = None;
     // Prioritize active node or groups
     if let Some(active_id) = active_node_id {
         if all_proxy_tags.contains(&active_id.to_string())
             || group_tags.contains(&active_id.to_string())
         {
             main_selector_outbounds.push(active_id.to_string());
+            default_outbound = Some(active_id.to_string());
         }
     }
     for gt in &group_tags {
@@ -232,12 +280,17 @@ pub fn generate_singbox_config(
     }
     main_selector_outbounds.push("direct".to_string());
 
-    let mut final_outbounds = Vec::new();
-    final_outbounds.push(json!({
+    let mut proxy_selector = json!({
         "type": "selector",
         "tag": "proxy",
         "outbounds": main_selector_outbounds
-    }));
+    });
+    if let Some(def) = default_outbound {
+        proxy_selector["default"] = Value::String(def);
+    }
+
+    let mut final_outbounds = Vec::new();
+    final_outbounds.push(proxy_selector);
     final_outbounds.extend(outbounds);
 
     // Standard built-ins
@@ -255,14 +308,18 @@ pub fn generate_singbox_config(
     // 6. Route section
     root.insert(
         "route".to_string(),
-        generate_singbox_route(routing, "proxy"),
+        generate_singbox_route_with_options(routing, "proxy", settings.tun_mode),
     );
 
     let formatted = serde_json::to_string_pretty(&root)?;
     Ok(formatted)
 }
 
-fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
+fn compile_singbox_outbound(
+    node: &ProxyNode,
+    runnable_tags: &HashSet<String>,
+    name_to_tag: &HashMap<String, String>,
+) -> Option<(Vec<Value>, String)> {
     let mut list = Vec::new();
     let tag = node.id.clone();
 
@@ -282,17 +339,14 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                     ob["plugin_opts"] = json!(opts);
                 }
             }
-            apply_detour_if_any(&mut ob, node);
+            if ss.uot == Some(true) {
+                ob["udp_over_tcp"] = json!(true);
+            }
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::ShadowsocksR(_) => {
-            // sing-box lacks native SSR; map to local socks placeholder if dialed or direct
-            let mut ob = json!({
-                "type": "direct",
-                "tag": tag
-            });
-            apply_detour_if_any(&mut ob, node);
-            list.push(ob);
+            return None;
         }
         ProtocolConfig::Vmess(vm) => {
             let mut ob = json!({
@@ -314,7 +368,7 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                     ob["transport"] = tr_val;
                 }
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Vless(vl) => {
@@ -340,7 +394,7 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                     ob["transport"] = tr_val;
                 }
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Trojan(tr) => {
@@ -363,7 +417,7 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                     ob["transport"] = tr_val;
                 }
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Hysteria(hy) => {
@@ -383,12 +437,12 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
             }
             if let Some(tls) = &node.tls {
                 if tls.enabled {
-                    ob["tls"] = compile_singbox_tls(tls);
+                    ob["tls"] = compile_singbox_tls_opts(tls, false);
                 }
             } else {
                 ob["tls"] = json!({ "enabled": true, "server_name": node.server });
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Hysteria2(hy2) => {
@@ -399,6 +453,29 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                 "server_port": node.port,
                 "password": hy2.password
             });
+            if let Some(ports_raw) = &hy2.ports {
+                let server_ports: Vec<String> = ports_raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|p| {
+                        let colon = p.replace('-', ":");
+                        if colon.contains(':') {
+                            colon
+                        } else {
+                            format!("{colon}:{colon}")
+                        }
+                    })
+                    .collect();
+                if !server_ports.is_empty() {
+                    ob["server_ports"] = json!(server_ports);
+                }
+            }
+            if let Some(hop) = hy2.hop_interval {
+                if hop > 0 {
+                    ob["hop_interval"] = json!(format!("{hop}s"));
+                }
+            }
             if let Some(up) = hy2.up_mbps {
                 ob["up_mbps"] = json!(up);
             }
@@ -413,12 +490,12 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
             }
             if let Some(tls) = &node.tls {
                 if tls.enabled {
-                    ob["tls"] = compile_singbox_tls(tls);
+                    ob["tls"] = compile_singbox_tls_opts(tls, false);
                 }
             } else {
                 ob["tls"] = json!({ "enabled": true, "server_name": node.server });
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Tuic(tuic) => {
@@ -436,14 +513,22 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
             if let Some(mode) = &tuic.udp_relay_mode {
                 ob["udp_relay_mode"] = json!(mode);
             }
+            if tuic.zero_rtt_handshake == Some(true) {
+                ob["zero_rtt_handshake"] = json!(true);
+            }
+            if let Some(hb) = &tuic.heartbeat {
+                if !hb.trim().is_empty() {
+                    ob["heartbeat"] = json!(hb.trim());
+                }
+            }
             if let Some(tls) = &node.tls {
                 if tls.enabled {
-                    ob["tls"] = compile_singbox_tls(tls);
+                    ob["tls"] = compile_singbox_tls_opts(tls, false);
                 }
             } else {
                 ob["tls"] = json!({ "enabled": true, "server_name": node.server });
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::AnyTls(atls) => {
@@ -454,6 +539,19 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                 "server_port": node.port,
                 "password": atls.password
             });
+            if let Some(chk) = &atls.idle_session_check_interval {
+                if !chk.trim().is_empty() {
+                    ob["idle_session_check_interval"] = json!(chk.trim());
+                }
+            }
+            if let Some(timeout) = &atls.idle_session_timeout {
+                if !timeout.trim().is_empty() {
+                    ob["idle_session_timeout"] = json!(timeout.trim());
+                }
+            }
+            if let Some(min_idle) = atls.min_idle_session {
+                ob["min_idle_session"] = json!(min_idle);
+            }
             if let Some(tls) = &node.tls {
                 if tls.enabled {
                     ob["tls"] = compile_singbox_tls(tls);
@@ -461,21 +559,24 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
             } else {
                 ob["tls"] = json!({ "enabled": true, "server_name": node.server });
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::ShadowTls(stls) => {
             let outer_tag = format!("{}-outer", tag);
-            let mut outer_tls = json!({
-                "enabled": true,
-                "server_name": node.server
-            });
-            if let Some(tls) = &node.tls {
-                if let Some(sni) = &tls.server_name {
-                    outer_tls["server_name"] = json!(sni);
+            let outer_tls = if let Some(tls) = &node.tls {
+                let mut t = compile_singbox_tls(tls);
+                if t.get("server_name").is_none() {
+                    t["server_name"] = json!(node.server);
                 }
-            }
-            let outer_ob = json!({
+                t
+            } else {
+                json!({
+                    "enabled": true,
+                    "server_name": node.server
+                })
+            };
+            let mut outer_ob = json!({
                 "type": "shadowtls",
                 "tag": outer_tag,
                 "server": node.server,
@@ -484,12 +585,10 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                 "password": stls.password,
                 "tls": outer_tls
             });
+            apply_detour_if_any(&mut outer_ob, node, runnable_tags, name_to_tag);
             list.push(outer_ob);
 
-            let inner_method = stls
-                .inner_method
-                .as_deref()
-                .unwrap_or("2022-blake3-aes-128-gcm");
+            let inner_method = stls.inner_method.as_deref().unwrap_or("aes-128-gcm");
             let inner_pass = stls.inner_password.as_deref().unwrap_or(&stls.password);
 
             let inner_ob = json!({
@@ -502,15 +601,17 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
             list.push(inner_ob);
         }
         ProtocolConfig::Naive(naive) => {
-            // NaiveProxy is an HTTP/2 CONNECT proxy with TLS. Sing-box HTTP outbound handles it seamlessly without cronet!
-            let mut ob = json!({
-                "type": "http",
-                "tag": tag,
-                "server": node.server,
-                "server_port": node.port,
-                "username": naive.username,
-                "password": naive.password,
-                "tls": {
+            let tls_obj = if let Some(tls) = &node.tls {
+                let mut t = compile_singbox_tls(tls);
+                if t.get("server_name").is_none() {
+                    t["server_name"] = json!(node.server);
+                }
+                if t.get("alpn").is_none() {
+                    t["alpn"] = json!(["h2", "http/1.1"]);
+                }
+                t
+            } else {
+                json!({
                     "enabled": true,
                     "server_name": node.server,
                     "alpn": ["h2", "http/1.1"],
@@ -518,9 +619,21 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                         "enabled": true,
                         "fingerprint": "chrome"
                     }
-                }
+                })
+            };
+            let mut ob = json!({
+                "type": "http",
+                "tag": tag,
+                "server": node.server,
+                "server_port": node.port,
+                "username": naive.username,
+                "password": naive.password,
+                "tls": tls_obj
             });
-            apply_detour_if_any(&mut ob, node);
+            if !naive.extra_headers.is_empty() {
+                ob["headers"] = json!(naive.extra_headers);
+            }
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Ssh(ssh) => {
@@ -537,7 +650,19 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
             if let Some(pk) = &ssh.private_key {
                 ob["private_key"] = json!(pk);
             }
-            apply_detour_if_any(&mut ob, node);
+            if let Some(pp) = &ssh.private_key_passphrase {
+                ob["private_key_passphrase"] = json!(pp);
+            }
+            if !ssh.host_key.is_empty() {
+                ob["host_key"] = json!(ssh.host_key);
+            }
+            if !ssh.host_key_algorithms.is_empty() {
+                ob["host_key_algorithms"] = json!(ssh.host_key_algorithms);
+            }
+            if let Some(cv) = &ssh.client_version {
+                ob["client_version"] = json!(cv);
+            }
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Socks5(s5) => {
@@ -552,7 +677,7 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                 ob["username"] = json!(u);
                 ob["password"] = json!(p);
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
         ProtocolConfig::Http(http) => {
@@ -571,35 +696,44 @@ fn compile_singbox_outbound(node: &ProxyNode) -> (Vec<Value>, String) {
                     ob["tls"] = compile_singbox_tls(tls);
                 }
             }
-            apply_detour_if_any(&mut ob, node);
+            apply_detour_if_any(&mut ob, node, runnable_tags, name_to_tag);
             list.push(ob);
         }
-        ProtocolConfig::Snell(_) | ProtocolConfig::Mieru(_) => {
-            // These protocols are mihomo-exclusive; provide direct fallback in sing-box
-            let mut ob = json!({
-                "type": "direct",
-                "tag": tag
-            });
-            apply_detour_if_any(&mut ob, node);
-            list.push(ob);
-        }
-        ProtocolConfig::WireGuard(_) => {
-            // Handled as endpoint
+        ProtocolConfig::Snell(_) | ProtocolConfig::Mieru(_) | ProtocolConfig::WireGuard(_) => {
+            return None;
         }
     }
 
-    (list, tag)
+    Some((list, tag))
 }
 
-fn apply_detour_if_any(ob: &mut Value, node: &ProxyNode) {
+fn apply_detour_if_any(
+    ob: &mut Value,
+    node: &ProxyNode,
+    runnable_tags: &HashSet<String>,
+    name_to_tag: &HashMap<String, String>,
+) {
     if let Some(dialer) = &node.dialer_proxy {
-        if !dialer.is_empty() {
-            ob["detour"] = json!(dialer);
+        let trimmed = dialer.trim();
+        if trimmed.is_empty() || trimmed == node.id {
+            return;
+        }
+        let target_tag = if runnable_tags.contains(trimmed) {
+            Some(trimmed.to_string())
+        } else {
+            name_to_tag.get(trimmed).cloned().filter(|t| t != &node.id)
+        };
+        if let Some(t) = target_tag {
+            ob["detour"] = json!(t);
         }
     }
 }
 
 fn compile_singbox_tls(tls: &TlsConfig) -> Value {
+    compile_singbox_tls_opts(tls, true)
+}
+
+fn compile_singbox_tls_opts(tls: &TlsConfig, allow_utls: bool) -> Value {
     let mut obj = json!({
         "enabled": true
     });
@@ -613,11 +747,13 @@ fn compile_singbox_tls(tls: &TlsConfig) -> Value {
         obj["alpn"] = json!(tls.alpn);
     }
 
-    if let Some(fp) = &tls.fingerprint {
-        obj["utls"] = json!({
-            "enabled": true,
-            "fingerprint": fp
-        });
+    if allow_utls {
+        if let Some(fp) = &tls.fingerprint {
+            obj["utls"] = json!({
+                "enabled": true,
+                "fingerprint": fp
+            });
+        }
     }
 
     if let Some(RealityConfig {

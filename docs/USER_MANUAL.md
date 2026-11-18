@@ -13,13 +13,16 @@
   - TUN 模式：需要管理员权限以加载虚拟网络适配器驱动（客户端内置一键 UAC 提权功能）。
 
 ### 1.2 安装方式
-- **标准安装包 (`NovaProxy_0.1.0_x64-setup.exe`)**：
+- **标准安装包 (`NovaProxy_0.0.1_x64-setup.exe`)**：
   - 双击安装包，跟随安装向导完成安装；
   - 自动创建桌面快捷方式与开始菜单项；
   - 自动注册 `novaproxy://` 与 `clash://` 协议关联。
-- **免安装便携版 (`NovaProxy-0.1.0-windows-x64-portable.zip`)**：
+- **免安装便携版 (`NovaProxy-0.0.1-windows-x64-portable.zip`)**：
   - 解压至任意不含中文与特殊字符的文件夹；
   - 直接双击 `NovaProxy.exe` 即可运行，所有配置及数据库存放在用户本地目录。
+- **Android / macOS / Linux 版本**：
+  - Android 端提供 `NovaProxy-0.0.1-android-universal.apk`（内置 `arm64-v8a` + `x86_64` 三内核与 `NovaProxyVpnService` 全局 TUN 接管）；
+  - macOS 端提供 `.dmg`（Apple Silicon `arm64` & Intel `x64`），Linux 端提供 `.deb` 与 `.AppImage`。
 
 ### 1.3 卸载说明
 - 通过 Windows「设置」->「应用」->「已安装的应用」选择 NovaProxy 卸载。

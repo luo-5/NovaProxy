@@ -65,8 +65,30 @@ pub fn find_available_port(start_port: u16, allow_lan: bool) -> Result<u16, Proc
     Err(ProcessError::NoAvailablePort(start_port))
 }
 
-/// Inspects a JSON configuration (sing-box or Xray) for the primary inbound port,
-/// verifies port availability, and rewrites the port if `auto_fallback` is enabled.
+/// Checks and resolves port conflicts across JSON (sing-box / Xray) and YAML (Mihomo) configs.
+pub fn resolve_and_patch_core_ports(
+    core: CoreType,
+    config_raw: &str,
+    preferred_port: u16,
+    allow_lan: bool,
+    auto_fallback: bool,
+) -> Result<PortResolution, ProcessError> {
+    match core {
+        CoreType::SingBox | CoreType::Xray => {
+            resolve_and_patch_config_port(config_raw, preferred_port, allow_lan, auto_fallback)
+        }
+        CoreType::Mihomo => resolve_and_patch_mihomo_yaml_ports(
+            config_raw,
+            preferred_port,
+            allow_lan,
+            auto_fallback,
+        ),
+    }
+}
+
+/// Inspects a JSON configuration (sing-box or Xray) for the primary inbound port
+/// (plus secondary http-in / Clash API controller ports), verifies port availability,
+/// and rewrites conflicting ports if `auto_fallback` is enabled.
 pub fn resolve_and_patch_config_port(
     config_raw: &str,
     preferred_port: u16,
@@ -77,12 +99,22 @@ pub fn resolve_and_patch_config_port(
     let mut json_val: Value =
         serde_json::from_str(clean).map_err(|e| ProcessError::InvalidConfigJson(e.to_string()))?;
 
-    // Determine the target port from the first inbound's `listen_port` (sing-box) or `port` (xray),
-    // falling back to `preferred_port`.
-    let detected_port = json_val
+    // Determine the primary TCP/mixed socket inbound (skipping TUN inbound which has no port).
+    let primary_idx = json_val
         .get("inbounds")
         .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
+        .and_then(|arr| {
+            arr.iter()
+                .position(|inb| inb.get("listen_port").is_some() || inb.get("port").is_some())
+        });
+
+    let detected_port = primary_idx
+        .and_then(|idx| {
+            json_val
+                .get("inbounds")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.get(idx))
+        })
         .and_then(|inb| {
             inb.get("listen_port")
                 .or_else(|| inb.get("port"))
@@ -91,30 +123,84 @@ pub fn resolve_and_patch_config_port(
         .and_then(|p| u16::try_from(p).ok())
         .unwrap_or(preferred_port);
 
-    if is_port_available(detected_port, allow_lan) {
-        let formatted = serde_json::to_string_pretty(&json_val)
-            .map_err(|e| ProcessError::InvalidConfigJson(e.to_string()))?;
-        return Ok(PortResolution {
-            requested_port: detected_port,
-            actual_port: detected_port,
-            reassigned: false,
-            config_content: formatted,
-        });
-    }
+    let (actual_port, reassigned) = if is_port_available(detected_port, allow_lan) {
+        (detected_port, false)
+    } else {
+        if !auto_fallback {
+            return Err(ProcessError::PortInUse(detected_port));
+        }
+        let next_start = detected_port.saturating_add(1);
+        let new_port = find_available_port(next_start, allow_lan)?;
+        if let (Some(idx), Some(inbounds)) = (
+            primary_idx,
+            json_val.get_mut("inbounds").and_then(|v| v.as_array_mut()),
+        ) {
+            if let Some(primary) = inbounds.get_mut(idx) {
+                if primary.get("listen_port").is_some() {
+                    primary["listen_port"] = Value::from(new_port);
+                } else if primary.get("port").is_some() {
+                    primary["port"] = Value::from(new_port);
+                }
+            }
+        }
+        (new_port, true)
+    };
 
-    if !auto_fallback {
-        return Err(ProcessError::PortInUse(detected_port));
-    }
+    // Check secondary JSON socket inbounds (excluding primary_idx) against conflict or collision
+    if auto_fallback {
+        let mut used_ports = vec![actual_port];
+        if let Some(inbounds) = json_val.get_mut("inbounds").and_then(|v| v.as_array_mut()) {
+            for (idx, inb) in inbounds.iter_mut().enumerate() {
+                if Some(idx) == primary_idx {
+                    continue;
+                }
+                let key = if inb.get("listen_port").is_some() {
+                    "listen_port"
+                } else if inb.get("port").is_some() {
+                    "port"
+                } else {
+                    continue;
+                };
+                if let Some(p) = inb
+                    .get(key)
+                    .and_then(|v| v.as_u64())
+                    .and_then(|p| u16::try_from(p).ok())
+                {
+                    let mut chosen = p;
+                    if used_ports.contains(&p) || !is_port_available(p, allow_lan) {
+                        let mut start = p.max(actual_port).saturating_add(1);
+                        while let Ok(free) = find_available_port(start, allow_lan) {
+                            if !used_ports.contains(&free) {
+                                chosen = free;
+                                inb[key] = Value::from(free);
+                                break;
+                            }
+                            start = free.saturating_add(1);
+                        }
+                    }
+                    used_ports.push(chosen);
+                }
+            }
+        }
 
-    let next_start = detected_port.saturating_add(1);
-    let new_port = find_available_port(next_start, allow_lan)?;
-
-    if let Some(inbounds) = json_val.get_mut("inbounds").and_then(|v| v.as_array_mut()) {
-        if let Some(first) = inbounds.first_mut() {
-            if first.get("listen_port").is_some() {
-                first["listen_port"] = Value::from(new_port);
-            } else if first.get("port").is_some() {
-                first["port"] = Value::from(new_port);
+        // Check sing-box experimental.clash_api.external_controller port on conflict
+        if let Some(ctrl) = json_val
+            .pointer("/experimental/clash_api/external_controller")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        {
+            if let Some((host, api_port)) = parse_host_port(&ctrl) {
+                if api_port == actual_port || !is_port_available(api_port, false) {
+                    if let Ok(free) =
+                        find_available_port(api_port.max(actual_port).saturating_add(1), false)
+                    {
+                        if let Some(slot) =
+                            json_val.pointer_mut("/experimental/clash_api/external_controller")
+                        {
+                            *slot = Value::String(format!("{host}:{free}"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -124,10 +210,221 @@ pub fn resolve_and_patch_config_port(
 
     Ok(PortResolution {
         requested_port: detected_port,
-        actual_port: new_port,
-        reassigned: true,
+        actual_port,
+        reassigned,
         config_content: formatted,
     })
+}
+
+fn parse_host_port(addr: &str) -> Option<(&str, u16)> {
+    let trimmed = addr.trim().trim_matches('"').trim_matches('\'');
+    let (host, port_str) = trimmed.rsplit_once(':')?;
+    let port = port_str.trim().parse::<u16>().ok()?;
+    Some((host, port))
+}
+
+fn resolve_and_patch_mihomo_yaml_ports(
+    config_raw: &str,
+    preferred_port: u16,
+    allow_lan: bool,
+    auto_fallback: bool,
+) -> Result<PortResolution, ProcessError> {
+    let clean = config_raw.trim_start_matches('\u{feff}');
+    let mut detected_mixed: Option<u16> = None;
+    let mut detected_ctrl: Option<(String, u16)> = None;
+
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if line.starts_with(char::is_whitespace) || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("mixed-port:") {
+            if let Ok(p) = rest.trim().parse::<u16>() {
+                detected_mixed = Some(p);
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("external-controller:") {
+            if let Some((h, p)) = parse_host_port(rest) {
+                detected_ctrl = Some((h.to_string(), p));
+            }
+        }
+    }
+
+    let req_port = detected_mixed.unwrap_or(preferred_port);
+    let (actual_port, reassigned) = if is_port_available(req_port, allow_lan) {
+        (req_port, false)
+    } else {
+        if !auto_fallback {
+            return Err(ProcessError::PortInUse(req_port));
+        }
+        let next = req_port.saturating_add(1);
+        (find_available_port(next, allow_lan)?, true)
+    };
+
+    let new_ctrl = if auto_fallback {
+        detected_ctrl.as_ref().and_then(|(host, api_port)| {
+            if *api_port == actual_port || !is_port_available(*api_port, false) {
+                find_available_port((*api_port).max(actual_port).saturating_add(1), false)
+                    .ok()
+                    .map(|p| format!("{host}:{p}"))
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    if !reassigned && new_ctrl.is_none() {
+        return Ok(PortResolution {
+            requested_port: req_port,
+            actual_port,
+            reassigned: false,
+            config_content: clean.to_string(),
+        });
+    }
+
+    let mut patched_lines = Vec::new();
+    for line in clean.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            let t = line.trim_start();
+            if reassigned && t.starts_with("mixed-port:") {
+                patched_lines.push(format!("mixed-port: {actual_port}"));
+                continue;
+            }
+            if let Some(ref ctrl_val) = new_ctrl {
+                if t.starts_with("external-controller:") {
+                    patched_lines.push(format!("external-controller: {ctrl_val}"));
+                    continue;
+                }
+            }
+        }
+        patched_lines.push(line.to_string());
+    }
+    let mut output = patched_lines.join("\n");
+    if clean.ends_with('\n') {
+        output.push('\n');
+    }
+
+    Ok(PortResolution {
+        requested_port: req_port,
+        actual_port,
+        reassigned,
+        config_content: output,
+    })
+}
+
+/// Extracts the Clash API controller port from a generated sing-box JSON or Mihomo YAML config.
+pub fn extract_clash_api_port(core: CoreType, config_raw: &str) -> Option<u16> {
+    let clean = config_raw.trim_start_matches('\u{feff}');
+    match core {
+        CoreType::SingBox => {
+            let v: Value = serde_json::from_str(clean).ok()?;
+            let ctrl = v
+                .pointer("/experimental/clash_api/external_controller")?
+                .as_str()?;
+            parse_host_port(ctrl).map(|(_, p)| p)
+        }
+        CoreType::Mihomo => {
+            for line in clean.lines() {
+                if !line.starts_with(char::is_whitespace) {
+                    if let Some(rest) = line.trim().strip_prefix("external-controller:") {
+                        if let Some((_, p)) = parse_host_port(rest) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        CoreType::Xray => None,
+    }
+}
+
+/// Patches a primary core configuration's upstream relay outbound port if the upstream relay's
+/// local port was auto-reassigned due to conflict.
+pub fn patch_relay_outbound_port(
+    core: CoreType,
+    config_raw: &str,
+    old_port: u16,
+    new_port: u16,
+) -> String {
+    if old_port == new_port {
+        return config_raw.to_string();
+    }
+    match core {
+        CoreType::SingBox => {
+            let Ok(mut val) = serde_json::from_str::<Value>(config_raw) else {
+                return config_raw.to_string();
+            };
+            if let Some(outbounds) = val.get_mut("outbounds").and_then(|v| v.as_array_mut()) {
+                for ob in outbounds {
+                    let is_relay = ob
+                        .get("tag")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t.starts_with("relay-"));
+                    let matches_port = ob
+                        .get("server_port")
+                        .and_then(|p| p.as_u64())
+                        .is_some_and(|p| p == u64::from(old_port));
+                    if is_relay && matches_port {
+                        ob["server_port"] = Value::from(new_port);
+                    }
+                }
+            }
+            serde_json::to_string_pretty(&val).unwrap_or_else(|_| config_raw.to_string())
+        }
+        CoreType::Mihomo => {
+            let old_line = format!("    port: {old_port}");
+            let new_line = format!("    port: {new_port}");
+            let mut in_relay_block = false;
+            let mut replaced = false;
+            let mut out_lines = Vec::new();
+            for line in config_raw.lines() {
+                let trimmed = line.trim_start();
+                if line.starts_with("  - name:") {
+                    in_relay_block = trimmed.contains("(Relay via ") || trimmed.contains("relay-");
+                } else if !line.starts_with(' ') {
+                    in_relay_block = false;
+                }
+                if in_relay_block && !replaced && line == old_line {
+                    out_lines.push(new_line.clone());
+                    replaced = true;
+                } else {
+                    out_lines.push(line.to_string());
+                }
+            }
+            if replaced {
+                let mut joined = out_lines.join("\n");
+                if config_raw.ends_with('\n') {
+                    joined.push('\n');
+                }
+                joined
+            } else {
+                config_raw.replacen(&old_line, &new_line, 1)
+            }
+        }
+        CoreType::Xray => config_raw.to_string(),
+    }
+}
+
+/// Ensures a binary file has executable permissions on Unix targets (safe no-op on read-only mounts).
+pub fn ensure_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode();
+            if (mode & 0o111) != 0o111 {
+                let mut perms = meta.permissions();
+                perms.set_mode(mode | 0o755);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 /// Applies `CREATE_NO_WINDOW` on Windows to prevent console window popups
@@ -154,6 +451,7 @@ pub async fn check_core_config(
             binary_path.display().to_string(),
         ));
     }
+    ensure_executable(binary_path);
 
     let mut cmd = Command::new(binary_path);
     configure_command_no_window(&mut cmd);
@@ -210,12 +508,26 @@ pub fn build_core_run_command(
     config_path: &Path,
     work_dir: &Path,
 ) -> Command {
+    ensure_executable(binary_path);
     let mut cmd = Command::new(binary_path);
     configure_command_no_window(&mut cmd);
     cmd.current_dir(work_dir);
     cmd.kill_on_drop(true);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            // Isolate into its own process group so JobObject cleanup can terminate the tree.
+            let _ = libc::setpgid(0, 0);
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                let _ = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            }
+            Ok(())
+        });
+    }
 
     match core {
         CoreType::SingBox => {
@@ -402,10 +714,75 @@ mod win_job {
 #[cfg(target_os = "windows")]
 pub use win_job::JobObject;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(unix)]
+mod unix_job {
+    use super::ProcessError;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Unix process-group supervisor mirroring Win32 JobObject termination semantics.
+    pub struct JobObject {
+        pids: Mutex<Vec<u32>>,
+        terminated: AtomicBool,
+    }
+
+    impl JobObject {
+        pub fn new() -> Result<Self, ProcessError> {
+            Ok(Self {
+                pids: Mutex::new(Vec::new()),
+                terminated: AtomicBool::new(false),
+            })
+        }
+
+        pub fn assign_pid(&self, pid: u32) -> Result<(), ProcessError> {
+            self.pids.lock().push(pid);
+            Ok(())
+        }
+
+        pub fn terminate(&self) {
+            if self.terminated.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let pids = self.pids.lock().clone();
+            for pid in &pids {
+                let raw = *pid as i32;
+                if raw > 0 {
+                    unsafe {
+                        // Signal both process group and direct PID gracefully first.
+                        let _ = libc::kill(-raw, libc::SIGTERM);
+                        let _ = libc::kill(raw, libc::SIGTERM);
+                    }
+                }
+            }
+            if !pids.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                for pid in &pids {
+                    let raw = *pid as i32;
+                    if raw > 0 {
+                        unsafe {
+                            let _ = libc::kill(-raw, libc::SIGKILL);
+                            let _ = libc::kill(raw, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    impl Drop for JobObject {
+        fn drop(&mut self) {
+            self.terminate();
+        }
+    }
+}
+
+#[cfg(unix)]
+pub use unix_job::JobObject;
+
+#[cfg(all(not(target_os = "windows"), not(unix)))]
 pub struct JobObject;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(unix)))]
 impl JobObject {
     pub fn new() -> Result<Self, ProcessError> {
         Ok(Self)
@@ -556,5 +933,76 @@ mod tests {
             .expect("child process should be terminated by JobObject")
             .expect("wait result");
         assert!(is_port_available(free_port, false));
+    }
+
+    #[test]
+    fn test_mihomo_yaml_port_and_controller_fallback() {
+        let mixed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_mixed = mixed_listener.local_addr().unwrap().port();
+        let ctrl_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_ctrl = ctrl_listener.local_addr().unwrap().port();
+
+        let yaml_cfg = format!(
+            "mixed-port: {}\nallow-lan: false\nexternal-controller: \"127.0.0.1:{}\"\nmode: rule\n",
+            occupied_mixed, occupied_ctrl
+        );
+
+        let res =
+            resolve_and_patch_core_ports(CoreType::Mihomo, &yaml_cfg, occupied_mixed, false, true)
+                .expect("mihomo yaml fallback");
+        assert!(res.reassigned);
+        assert_ne!(res.actual_port, occupied_mixed);
+        assert!(res
+            .config_content
+            .contains(&format!("mixed-port: {}", res.actual_port)));
+
+        let new_api_port = extract_clash_api_port(CoreType::Mihomo, &res.config_content)
+            .expect("extract mihomo clash api port");
+        assert_ne!(new_api_port, occupied_ctrl);
+        assert_ne!(new_api_port, res.actual_port);
+    }
+
+    #[test]
+    fn test_patch_relay_outbound_port_singbox_and_mihomo() {
+        let sb_cfg = r#"{
+  "outbounds": [
+    { "type": "socks", "tag": "relay-node", "server": "127.0.0.1", "server_port": 18889 },
+    { "type": "direct", "tag": "direct" }
+  ]
+}"#;
+        let patched_sb = patch_relay_outbound_port(CoreType::SingBox, sb_cfg, 18889, 18999);
+        assert!(patched_sb.contains("18999"));
+        assert!(!patched_sb.contains("18889"));
+
+        let mh_cfg = "proxies:\n  - name: relay-node\n    type: socks5\n    server: 127.0.0.1\n    port: 18889\n";
+        let patched_mh = patch_relay_outbound_port(CoreType::Mihomo, mh_cfg, 18889, 18999);
+        assert!(patched_mh.contains("port: 18999"));
+        assert!(!patched_mh.contains("port: 18889"));
+    }
+
+    #[test]
+    fn test_singbox_tun_first_inbound_does_not_block_mixed_port_fallback() {
+        let mixed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_mixed = mixed_listener.local_addr().unwrap().port();
+        let cfg = serde_json::json!({
+            "inbounds": [
+                { "type": "tun", "tag": "tun-in" },
+                { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": occupied_mixed }
+            ],
+            "experimental": {
+                "clash_api": { "external_controller": "127.0.0.1:0" }
+            }
+        });
+        let raw = serde_json::to_string(&cfg).unwrap();
+        let res =
+            resolve_and_patch_core_ports(CoreType::SingBox, &raw, occupied_mixed, false, true)
+                .expect("tun + occupied mixed port should reassign mixed port");
+        assert!(res.reassigned);
+        assert_ne!(res.actual_port, occupied_mixed);
+        let parsed: serde_json::Value = serde_json::from_str(&res.config_content).unwrap();
+        assert_eq!(
+            parsed["inbounds"][1]["listen_port"].as_u64(),
+            Some(u64::from(res.actual_port))
+        );
     }
 }

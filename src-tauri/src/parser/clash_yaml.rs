@@ -1,8 +1,8 @@
 use crate::model::{
-    AnyTlsConfig, HttpConfig, Hysteria2Config, HysteriaConfig, MieruConfig, ProtocolConfig,
-    ProtocolType, ProxyNode, RealityConfig, ShadowTlsConfig, ShadowsocksConfig, ShadowsocksRConfig,
-    SnellConfig, Socks5Config, SshConfig, TlsConfig, TransportConfig, TrojanConfig, TuicConfig,
-    VlessConfig, VmessConfig, WireGuardConfig,
+    AnyTlsConfig, GroupType, HttpConfig, Hysteria2Config, HysteriaConfig, MieruConfig, NodeGroup,
+    ProtocolConfig, ProtocolType, ProxyNode, RealityConfig, ShadowTlsConfig, ShadowsocksConfig,
+    ShadowsocksRConfig, SnellConfig, Socks5Config, SshConfig, TlsConfig, TransportConfig,
+    TrojanConfig, TuicConfig, VlessConfig, VmessConfig, WireGuardConfig,
 };
 use crate::parser::error::{ParseError, ParseResult};
 use crate::parser::uri_common::normalize_host;
@@ -234,6 +234,27 @@ fn parse_clash_transport(map: &serde_yaml::Mapping) -> Option<TransportConfig> {
     }
 }
 
+fn parse_clash_wireguard_reserved(map: &serde_yaml::Mapping) -> Option<[u8; 3]> {
+    let val = map.get(Value::String("reserved".to_string()))?;
+    if let Some(seq) = val.as_sequence() {
+        if seq.len() >= 3 {
+            let b0 = seq[0].as_u64().and_then(|v| u8::try_from(v).ok())?;
+            let b1 = seq[1].as_u64().and_then(|v| u8::try_from(v).ok())?;
+            let b2 = seq[2].as_u64().and_then(|v| u8::try_from(v).ok())?;
+            return Some([b0, b1, b2]);
+        }
+    } else if let Some(s) = val.as_str() {
+        let parts: Vec<u8> = s
+            .split(',')
+            .filter_map(|p| p.trim().parse::<u8>().ok())
+            .collect();
+        if parts.len() >= 3 {
+            return Some([parts[0], parts[1], parts[2]]);
+        }
+    }
+    None
+}
+
 /// Parses a single Clash / Mihomo proxy mapping into a `ProxyNode`
 pub fn parse_clash_proxy_map(map: &serde_yaml::Mapping, sort_order: i32) -> ParseResult<ProxyNode> {
     let proxy_type = get_str(map, "type")
@@ -241,13 +262,25 @@ pub fn parse_clash_proxy_map(map: &serde_yaml::Mapping, sort_order: i32) -> Pars
         .trim()
         .to_ascii_lowercase();
 
-    let raw_server = get_string(map, "server").ok_or(ParseError::MissingField("server"))?;
+    let first_wg_peer = if proxy_type == "wireguard" {
+        map.get(Value::String("peers".to_string()))
+            .and_then(|v| v.as_sequence())
+            .and_then(|seq| seq.first())
+            .and_then(|v| v.as_mapping())
+    } else {
+        None
+    };
+
+    let raw_server = get_string(map, "server")
+        .or_else(|| first_wg_peer.and_then(|p| get_string(p, "server")))
+        .ok_or(ParseError::MissingField("server"))?;
     let server = normalize_host(&raw_server);
     if server.is_empty() {
         return Err(ParseError::MissingField("server"));
     }
 
     let port = get_u16(map, "port")
+        .or_else(|| first_wg_peer.and_then(|p| get_u16(p, "port")))
         .filter(|&p| p > 0)
         .ok_or_else(|| ParseError::InvalidPort("missing or invalid port".to_string()))?;
 
@@ -392,8 +425,9 @@ pub fn parse_clash_proxy_map(map: &serde_yaml::Mapping, sort_order: i32) -> Pars
                     down_mbps: get_u32_mbps(map, "down"),
                     obfs_type: get_string(map, "obfs"),
                     obfs_password: get_string(map, "obfs-password"),
-                    ports: get_string(map, "ports"),
-                    hop_interval: get_u32_mbps(map, "hop-interval"),
+                    ports: get_string(map, "ports").or_else(|| get_string(map, "mport")),
+                    hop_interval: get_u32_mbps(map, "hop-interval")
+                        .or_else(|| get_u32_mbps(map, "hop_interval")),
                 }),
                 tls,
                 None,
@@ -420,8 +454,9 @@ pub fn parse_clash_proxy_map(map: &serde_yaml::Mapping, sort_order: i32) -> Pars
         "wireguard" => {
             let private_key =
                 get_string(map, "private-key").ok_or(ParseError::MissingField("private-key"))?;
-            let public_key =
-                get_string(map, "public-key").ok_or(ParseError::MissingField("public-key"))?;
+            let public_key = get_string(map, "public-key")
+                .or_else(|| first_wg_peer.and_then(|p| get_string(p, "public-key")))
+                .ok_or(ParseError::MissingField("public-key"))?;
             let mut local_address = Vec::new();
             if let Some(ip) = get_string(map, "ip") {
                 local_address.push(if ip.contains('/') {
@@ -440,15 +475,23 @@ pub fn parse_clash_proxy_map(map: &serde_yaml::Mapping, sort_order: i32) -> Pars
             if local_address.is_empty() {
                 local_address.push("10.0.0.2/32".to_string());
             }
+            let preshared_key = get_string(map, "pre-shared-key")
+                .or_else(|| get_string(map, "preshared-key"))
+                .or_else(|| {
+                    first_wg_peer.and_then(|p| {
+                        get_string(p, "pre-shared-key").or_else(|| get_string(p, "preshared-key"))
+                    })
+                });
+            let reserved = parse_clash_wireguard_reserved(map)
+                .or_else(|| first_wg_peer.and_then(parse_clash_wireguard_reserved));
             (
                 ProtocolType::WireGuard,
                 ProtocolConfig::WireGuard(WireGuardConfig {
                     private_key,
                     public_key,
-                    preshared_key: get_string(map, "pre-shared-key")
-                        .or_else(|| get_string(map, "preshared-key")),
+                    preshared_key,
                     local_address,
-                    reserved: None,
+                    reserved,
                     mtu: get_u16(map, "mtu"),
                     workers: None,
                 }),
@@ -589,8 +632,10 @@ pub fn parse_clash_proxy_map(map: &serde_yaml::Mapping, sort_order: i32) -> Pars
     })
 }
 
-/// Parses a Clash / Mihomo YAML subscription document (`proxies:` list)
-pub fn parse_clash_yaml(yaml_text: &str) -> ParseResult<(Vec<ProxyNode>, Vec<String>)> {
+/// Parses a Clash / Mihomo YAML subscription document (`proxies:` and optional `proxy-groups:`)
+pub fn parse_clash_yaml_with_groups(
+    yaml_text: &str,
+) -> ParseResult<(Vec<ProxyNode>, Vec<NodeGroup>, Vec<String>)> {
     let doc: Value = serde_yaml::from_str(yaml_text)?;
     let mapping = doc
         .as_mapping()
@@ -622,5 +667,145 @@ pub fn parse_clash_yaml(yaml_text: &str) -> ParseResult<(Vec<ProxyNode>, Vec<Str
         }
     }
 
+    let groups = parse_clash_proxy_groups(mapping, &nodes);
+
+    Ok((nodes, groups, warnings))
+}
+
+fn parse_clash_proxy_groups(mapping: &serde_yaml::Mapping, nodes: &[ProxyNode]) -> Vec<NodeGroup> {
+    let Some(pg_val) = mapping
+        .get(Value::String("proxy-groups".to_string()))
+        .or_else(|| mapping.get(Value::String("Proxy Group".to_string())))
+    else {
+        return Vec::new();
+    };
+    let Some(pg_seq) = pg_val.as_sequence() else {
+        return Vec::new();
+    };
+
+    let name_to_id: std::collections::HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.name.as_str(), n.id.as_str()))
+        .collect();
+
+    // First pass: capture raw group member names for nested group resolution
+    struct RawGroup {
+        name: String,
+        group_type: GroupType,
+        members: Vec<String>,
+        test_url: Option<String>,
+        interval_secs: Option<u32>,
+    }
+
+    let mut raw_groups = Vec::new();
+    for item in pg_seq {
+        let Some(g_map) = item.as_mapping() else {
+            continue;
+        };
+        let Some(name) = get_string(g_map, "name") else {
+            continue;
+        };
+        let g_type_str = get_string(g_map, "type").unwrap_or_else(|| "select".to_string());
+        let group_type = GroupType::from_str_lossy(&g_type_str);
+        let members = get_string_vec(g_map, "proxies");
+        let test_url = get_string(g_map, "url");
+        let interval_secs = get_u32_mbps(g_map, "interval");
+        raw_groups.push(RawGroup {
+            name,
+            group_type,
+            members,
+            test_url,
+            interval_secs,
+        });
+    }
+
+    let raw_by_name: std::collections::HashMap<&str, &RawGroup> =
+        raw_groups.iter().map(|g| (g.name.as_str(), g)).collect();
+
+    fn collect_node_ids(
+        group_name: &str,
+        raw_by_name: &std::collections::HashMap<&str, &RawGroup>,
+        name_to_id: &std::collections::HashMap<&str, &str>,
+        visiting: &mut std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+        seen_ids: &mut std::collections::HashSet<String>,
+    ) {
+        if !visiting.insert(group_name.to_string()) {
+            return;
+        }
+        if let Some(rg) = raw_by_name.get(group_name) {
+            for member in &rg.members {
+                let upper = member.trim().to_ascii_uppercase();
+                if matches!(upper.as_str(), "DIRECT" | "REJECT" | "PASS" | "COMPATIBLE") {
+                    continue;
+                }
+                if let Some(&id) = name_to_id.get(member.as_str()) {
+                    if seen_ids.insert(id.to_string()) {
+                        out.push(id.to_string());
+                    }
+                } else if raw_by_name.contains_key(member.as_str()) {
+                    collect_node_ids(member, raw_by_name, name_to_id, visiting, out, seen_ids);
+                }
+            }
+        }
+        visiting.remove(group_name);
+    }
+
+    let mut result = Vec::new();
+    for (idx, rg) in raw_groups.iter().enumerate() {
+        let mut node_ids = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        // Direct members first
+        for m in &rg.members {
+            if let Some(&id) = name_to_id.get(m.as_str()) {
+                if seen_ids.insert(id.to_string()) {
+                    node_ids.push(id.to_string());
+                }
+            }
+        }
+        // Fallback: flatten referenced sub-groups if no direct node members matched
+        if node_ids.is_empty() {
+            let mut visiting = std::collections::HashSet::new();
+            collect_node_ids(
+                &rg.name,
+                &raw_by_name,
+                &name_to_id,
+                &mut visiting,
+                &mut node_ids,
+                &mut seen_ids,
+            );
+        }
+        if node_ids.is_empty() {
+            continue;
+        }
+        let deterministic_id = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"clash-group:");
+            hasher.update(rg.name.as_bytes());
+            let digest = hasher.finalize();
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            bytes[6] = (bytes[6] & 0x0f) | 0x50;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes).to_string()
+        };
+        result.push(NodeGroup {
+            id: deterministic_id,
+            name: rg.name.clone(),
+            group_type: rg.group_type,
+            node_ids,
+            test_url: rg.test_url.clone(),
+            interval_secs: rg.interval_secs,
+            sort_order: idx as i32,
+        });
+    }
+
+    result
+}
+
+/// Parses a Clash / Mihomo YAML subscription document (`proxies:` list)
+pub fn parse_clash_yaml(yaml_text: &str) -> ParseResult<(Vec<ProxyNode>, Vec<String>)> {
+    let (nodes, _groups, warnings) = parse_clash_yaml_with_groups(yaml_text)?;
     Ok((nodes, warnings))
 }

@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capability for the NovaProxy main window",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "android-vpn:default"
+  ]
+}

@@ -1,0 +1,11 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Default permissions for NovaProxy Android VPN bridge"
+permissions = [
+    "allow-prepare-vpn",
+    "allow-start-vpn",
+    "allow-stop-vpn",
+    "allow-get-vpn-status",
+    "allow-get-native-lib-dir",
+]

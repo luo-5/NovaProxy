@@ -18,6 +18,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
   const [svgContent, setSvgContent] = useState<string>("");
   const [shareLink, setShareLink] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
+  const [copyError, setCopyError] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
 
   useEffect(() => {
@@ -25,6 +26,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
       setSvgContent("");
       setShareLink("");
       setCopied(false);
+      setCopyError(false);
       return;
     }
 
@@ -43,10 +45,17 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
 
   const handleCopy = () => {
     if (!shareLink) return;
-    navigator.clipboard.writeText(shareLink).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+    navigator.clipboard
+      .writeText(shareLink)
+      .then(() => {
+        setCopyError(false);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        setCopyError(true);
+        setTimeout(() => setCopyError(false), 2500);
+      });
   };
 
   return (
@@ -95,6 +104,8 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
                 <Check className="w-3.5 h-3.5 text-emerald-500" />
                 <span className="text-emerald-500">{t("common.copied")}</span>
               </>
+            ) : copyError ? (
+              <span className="text-red-500">{t("common.clipboardUnavailable")}</span>
             ) : (
               <>
                 <Copy className="w-3.5 h-3.5" />

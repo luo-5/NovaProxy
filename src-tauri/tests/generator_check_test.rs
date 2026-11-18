@@ -1,13 +1,13 @@
 use novaproxy_lib::core::process::check_core_config;
 use novaproxy_lib::generator::{generate_core_config, generate_multi_core_relay};
 use novaproxy_lib::model::node::{
-    AnyTlsConfig, CoreType, Hysteria2Config, HysteriaConfig, MieruConfig, ProtocolConfig,
-    ProtocolType, ProxyNode, RealityConfig, ShadowsocksConfig, ShadowsocksRConfig, SnellConfig,
-    Socks5Config, SshConfig, TlsConfig, TransportConfig, TrojanConfig, TuicConfig, VlessConfig,
-    VmessConfig, WireGuardConfig,
+    AnyTlsConfig, CoreType, HttpConfig, Hysteria2Config, HysteriaConfig, MieruConfig, NaiveConfig,
+    ProtocolConfig, ProtocolType, ProxyNode, RealityConfig, ShadowTlsConfig, ShadowsocksConfig,
+    ShadowsocksRConfig, SnellConfig, Socks5Config, SshConfig, TlsConfig, TransportConfig,
+    TrojanConfig, TuicConfig, VlessConfig, VmessConfig, WireGuardConfig,
 };
 use novaproxy_lib::model::routing::{DnsSettings, RoutingSettings, RuleAction, RuleItem, RuleType};
-use novaproxy_lib::model::settings::AppSettings;
+use novaproxy_lib::model::settings::{AppSettings, RoutingMode};
 use novaproxy_lib::model::subscription::{GroupType, NodeGroup};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -423,6 +423,68 @@ fn sample_test_nodes() -> Vec<ProxyNode> {
             preferred_core: None,
             sort_order: 13,
         },
+        // 15. ShadowTLS v3 (sing-box)
+        ProxyNode {
+            id: "node-shadowtls".to_string(),
+            name: "ShadowTLS-Node".to_string(),
+            server: "example.invalid".to_string(),
+            port: 443,
+            protocol: ProtocolType::ShadowTls,
+            tls: Some(TlsConfig {
+                enabled: true,
+                server_name: Some("gateway.icloud.com".to_string()),
+                insecure: false,
+                alpn: vec![],
+                fingerprint: Some("chrome".to_string()),
+                reality: None,
+                ech_config: None,
+                fragment: None,
+            }),
+            transport: None,
+            settings: ProtocolConfig::ShadowTls(ShadowTlsConfig {
+                version: 3,
+                password: "shadowtls_secret_pass".to_string(),
+                inner_protocol: Some("shadowsocks".to_string()),
+                inner_method: Some("2022-blake3-aes-128-gcm".to_string()),
+                inner_password: Some("YWJjZGVmZ2hpamtsbW5vcA==".to_string()),
+            }),
+            subscription_id: None,
+            group_id: None,
+            latency: None,
+            dialer_proxy: None,
+            preferred_core: None,
+            sort_order: 14,
+        },
+        // 16. HTTP/HTTPS outbound proxy
+        ProxyNode {
+            id: "node-http".to_string(),
+            name: "HTTPS-Proxy-Node".to_string(),
+            server: "example.invalid".to_string(),
+            port: 8443,
+            protocol: ProtocolType::Http,
+            tls: Some(TlsConfig {
+                enabled: true,
+                server_name: Some("example.invalid".to_string()),
+                insecure: false,
+                alpn: vec![],
+                fingerprint: None,
+                reality: None,
+                ech_config: None,
+                fragment: None,
+            }),
+            transport: None,
+            settings: ProtocolConfig::Http(HttpConfig {
+                username: Some("httpuser".to_string()),
+                password: Some("httppass".to_string()),
+                headers: BTreeMap::new(),
+            }),
+            subscription_id: None,
+            group_id: None,
+            latency: None,
+            dialer_proxy: None,
+            preferred_core: None,
+            sort_order: 15,
+        },
     ]
 }
 
@@ -451,9 +513,11 @@ async fn test_singbox_config_generation_and_binary_check() {
         sort_order: 0,
     }];
 
-    let mut settings = AppSettings::default();
-    settings.mixed_port = 17890;
-    settings.clash_api_port = 19090;
+    let settings = AppSettings {
+        mixed_port: 17890,
+        clash_api_port: 19090,
+        ..Default::default()
+    };
 
     let mut routing = RoutingSettings::default();
     routing.custom_rules.push(RuleItem {
@@ -525,9 +589,11 @@ async fn test_mihomo_config_generation_and_binary_check() {
         sort_order: 0,
     }];
 
-    let mut settings = AppSettings::default();
-    settings.mixed_port = 27890;
-    settings.clash_api_port = 29090;
+    let settings = AppSettings {
+        mixed_port: 27890,
+        clash_api_port: 29090,
+        ..Default::default()
+    };
 
     let routing = RoutingSettings::default();
     let dns = DnsSettings::default();
@@ -603,15 +669,17 @@ async fn test_xray_config_generation_and_binary_check() {
         sort_order: 0,
     };
 
-    let mut settings = AppSettings::default();
-    settings.mixed_port = 37890;
+    let settings = AppSettings {
+        mixed_port: 37890,
+        ..Default::default()
+    };
 
     let routing = RoutingSettings::default();
     let dns = DnsSettings::default();
 
     let cfg_str = generate_core_config(
         CoreType::Xray,
-        &[node_xhttp.clone()],
+        std::slice::from_ref(&node_xhttp),
         &[],
         &settings,
         &dns,
@@ -687,7 +755,7 @@ async fn test_multi_core_relay_cooperative_generation() {
         CoreType::SingBox,
         CoreType::Xray,
         &upstream_xhttp,
-        &[upstream_xhttp.clone()],
+        std::slice::from_ref(&upstream_xhttp),
         &[],
         &settings,
         &dns,
@@ -713,4 +781,523 @@ async fn test_multi_core_relay_cooperative_generation() {
     check_core_config(CoreType::SingBox, &sb_bin, &sb_cfg_path, &temp_dir)
         .await
         .expect("relay primary sing-box check must pass");
+}
+
+#[tokio::test]
+async fn test_hysteria2_port_hopping_all_transports_and_naive_check() {
+    let sb_bin = locate_core(CoreType::SingBox);
+    let mh_bin = locate_core(CoreType::Mihomo);
+    let xray_bin = locate_core(CoreType::Xray);
+    if !sb_bin.exists() || !mh_bin.exists() || !xray_bin.exists() {
+        return;
+    }
+
+    let temp_dir = std::env::temp_dir().join("novaproxy_test_hy2_transports");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    // Hysteria2 with port hopping (ports + hop_interval)
+    let hy2_hop = ProxyNode {
+        id: "node-hy2-hop".to_string(),
+        name: "Hy2-Hop".to_string(),
+        server: "example.invalid".to_string(),
+        port: 443,
+        protocol: ProtocolType::Hysteria2,
+        tls: Some(TlsConfig {
+            enabled: true,
+            server_name: Some("example.invalid".to_string()),
+            insecure: false,
+            alpn: vec![],
+            fingerprint: None,
+            reality: None,
+            ech_config: None,
+            fragment: None,
+        }),
+        transport: None,
+        settings: ProtocolConfig::Hysteria2(Hysteria2Config {
+            password: "hy2_hop_password".to_string(),
+            ports: Some("20000-50000".to_string()),
+            hop_interval: Some(30),
+            up_mbps: Some(50),
+            down_mbps: Some(200),
+            obfs_type: Some("salamander".to_string()),
+            obfs_password: Some("obfs_pass".to_string()),
+        }),
+        subscription_id: None,
+        group_id: None,
+        latency: None,
+        dialer_proxy: None,
+        preferred_core: None,
+        sort_order: 0,
+    };
+
+    // Transports shared across sing-box + mihomo + xray
+    let make_vmess = |id: &str, transport: TransportConfig| ProxyNode {
+        id: id.to_string(),
+        name: format!("VMess-{id}"),
+        server: "example.invalid".to_string(),
+        port: 443,
+        protocol: ProtocolType::Vmess,
+        tls: Some(TlsConfig {
+            enabled: true,
+            server_name: Some("example.invalid".to_string()),
+            insecure: false,
+            alpn: vec![],
+            fingerprint: None,
+            reality: None,
+            ech_config: None,
+            fragment: None,
+        }),
+        transport: Some(transport),
+        settings: ProtocolConfig::Vmess(VmessConfig {
+            uuid: "00000000-0000-0000-0000-000000000002".to_string(),
+            alter_id: 0,
+            security: "auto".to_string(),
+            global_padding: None,
+            authenticated_length: None,
+            packet_encoding: None,
+        }),
+        subscription_id: None,
+        group_id: None,
+        latency: None,
+        dialer_proxy: None,
+        preferred_core: None,
+        sort_order: 1,
+    };
+
+    let t_tcp_http = make_vmess(
+        "t-tcp-http",
+        TransportConfig::Tcp {
+            header_type: Some("http".to_string()),
+            http_host: vec!["cdn.example.invalid".to_string()],
+            http_path: Some("/video".to_string()),
+        },
+    );
+    let t_ws = make_vmess(
+        "t-ws",
+        TransportConfig::Ws {
+            path: "/ws".to_string(),
+            host: Some("cdn.example.invalid".to_string()),
+            headers: BTreeMap::new(),
+            max_early_data: Some(2048),
+            early_data_header_name: Some("Sec-WebSocket-Protocol".to_string()),
+        },
+    );
+    let t_grpc = make_vmess(
+        "t-grpc",
+        TransportConfig::Grpc {
+            service_name: "grpc.tun".to_string(),
+            multi_mode: true,
+            authority: Some("example.invalid".to_string()),
+        },
+    );
+    let t_http = make_vmess(
+        "t-http",
+        TransportConfig::Http {
+            host: vec!["example.invalid".to_string()],
+            path: "/h2".to_string(),
+            method: Some("PUT".to_string()),
+            headers: BTreeMap::new(),
+        },
+    );
+    let t_httpupgrade = make_vmess(
+        "t-up",
+        TransportConfig::HttpUpgrade {
+            host: Some("example.invalid".to_string()),
+            path: "/up".to_string(),
+            headers: BTreeMap::new(),
+        },
+    );
+    let t_quic = make_vmess(
+        "t-quic",
+        TransportConfig::Quic {
+            security: Some("none".to_string()),
+            key: None,
+            header_type: Some("none".to_string()),
+        },
+    );
+    let t_mkcp = make_vmess(
+        "t-mkcp",
+        TransportConfig::Mkcp {
+            seed: Some("seed123".to_string()),
+            header_type: Some("wechat-video".to_string()),
+            mtu: Some(1350),
+            tti: Some(50),
+            uplink_capacity: Some(10),
+            downlink_capacity: Some(50),
+            congestion: false,
+        },
+    );
+
+    let settings = AppSettings::default();
+    let dns = DnsSettings::default();
+    let routing = RoutingSettings::default();
+
+    // sing-box: Hy2 port hopping + Tcp/Ws/Grpc/Http/HttpUpgrade/Quic
+    let sb_nodes = vec![
+        hy2_hop.clone(),
+        t_tcp_http.clone(),
+        t_ws.clone(),
+        t_grpc.clone(),
+        t_http.clone(),
+        t_httpupgrade.clone(),
+        t_quic.clone(),
+    ];
+    let sb_cfg = generate_core_config(
+        CoreType::SingBox,
+        &sb_nodes,
+        &[],
+        &settings,
+        &dns,
+        &routing,
+        Some("node-hy2-hop"),
+    )
+    .expect("generate sing-box hy2+transports");
+    assert!(sb_cfg.contains("\"server_ports\""));
+    assert!(sb_cfg.contains("20000:50000"));
+    assert!(sb_cfg.contains("\"hop_interval\": \"30s\""));
+    let sb_path = temp_dir.join("hy2_transports_sb.json");
+    std::fs::write(&sb_path, sb_cfg.as_bytes()).unwrap();
+    check_core_config(CoreType::SingBox, &sb_bin, &sb_path, &temp_dir)
+        .await
+        .expect("sing-box check for hy2 port-hopping & transports must pass");
+
+    // mihomo: Hy2 port hopping + Tcp-HTTP/Ws/Grpc/Http/HttpUpgrade/Quic
+    let mh_cfg = generate_core_config(
+        CoreType::Mihomo,
+        &sb_nodes,
+        &[],
+        &settings,
+        &dns,
+        &routing,
+        Some("node-hy2-hop"),
+    )
+    .expect("generate mihomo hy2+transports");
+    assert!(mh_cfg.contains("ports: \"20000-50000\""));
+    assert!(mh_cfg.contains("hop-interval: 30"));
+    let mh_path = temp_dir.join("hy2_transports_mh.yaml");
+    std::fs::write(&mh_path, mh_cfg.as_bytes()).unwrap();
+    check_core_config(CoreType::Mihomo, &mh_bin, &mh_path, &temp_dir)
+        .await
+        .expect("mihomo check for hy2 port-hopping & transports must pass");
+
+    // xray: Tcp-HTTP obfs, Ws, Grpc, HttpUpgrade, Mkcp
+    let xray_nodes = vec![t_tcp_http, t_ws, t_grpc, t_httpupgrade, t_mkcp];
+    let xr_cfg = generate_core_config(
+        CoreType::Xray,
+        &xray_nodes,
+        &[],
+        &settings,
+        &dns,
+        &routing,
+        Some("t-tcp-http"),
+    )
+    .expect("generate xray transports");
+    assert!(xr_cfg.contains("\"tcpSettings\""));
+    let xr_path = temp_dir.join("transports_xray.json");
+    std::fs::write(&xr_path, xr_cfg.as_bytes()).unwrap();
+    check_core_config(CoreType::Xray, &xray_bin, &xr_path, &temp_dir)
+        .await
+        .expect("xray check for tcpSettings/ws/grpc/httpupgrade/mkcp must pass");
+
+    // Naive translates to HTTP/2 over TLS with uTLS & extra headers so sing-box runs without external libcronet.dll
+    let mut headers = BTreeMap::new();
+    headers.insert("User-Agent".to_string(), "Mozilla/5.0".to_string());
+    let naive_node = ProxyNode {
+        id: "node-naive".to_string(),
+        name: "Naive-Node".to_string(),
+        server: "example.invalid".to_string(),
+        port: 443,
+        protocol: ProtocolType::Naive,
+        tls: Some(TlsConfig {
+            enabled: true,
+            server_name: Some("example.invalid".to_string()),
+            insecure: false,
+            alpn: vec![],
+            fingerprint: None,
+            reality: None,
+            ech_config: None,
+            fragment: None,
+        }),
+        transport: None,
+        settings: ProtocolConfig::Naive(NaiveConfig {
+            username: "naiveuser".to_string(),
+            password: "naivepass".to_string(),
+            extra_headers: headers,
+            insecure_concurrency: Some(2),
+            quic: true,
+        }),
+        subscription_id: None,
+        group_id: None,
+        latency: None,
+        dialer_proxy: None,
+        preferred_core: None,
+        sort_order: 0,
+    };
+    let naive_cfg = generate_core_config(
+        CoreType::SingBox,
+        std::slice::from_ref(&naive_node),
+        &[],
+        &settings,
+        &dns,
+        &routing,
+        Some("node-naive"),
+    )
+    .expect("generate naive sing-box config");
+    assert!(naive_cfg.contains("\"type\": \"http\""));
+    assert!(naive_cfg.contains("\"username\": \"naiveuser\""));
+    assert!(naive_cfg.contains("\"h2\""));
+    assert!(naive_cfg.contains("\"User-Agent\": \"Mozilla/5.0\""));
+    let naive_path = temp_dir.join("naive_sb.json");
+    std::fs::write(&naive_path, naive_cfg.as_bytes()).unwrap();
+    check_core_config(CoreType::SingBox, &sb_bin, &naive_path, &temp_dir)
+        .await
+        .expect("sing-box check for naive config must pass");
+}
+
+#[tokio::test]
+async fn test_routing_modes_fakeip_custom_geosite_geoip_and_unsupported_error_guard() {
+    let sb_bin = locate_core(CoreType::SingBox);
+    let mh_bin = locate_core(CoreType::Mihomo);
+    if !sb_bin.exists() || !mh_bin.exists() {
+        return;
+    }
+
+    let temp_dir = std::env::temp_dir().join("novaproxy_test_routing_guard");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let nodes = sample_test_nodes();
+    let settings = AppSettings {
+        tun_mode: true,
+        ipv6: true,
+        ..AppSettings::default()
+    };
+    let dns = DnsSettings {
+        fake_ip: true,
+        fake_ip_range: "198.18.0.0/15".to_string(),
+        disable_ipv6: false,
+        ..DnsSettings::default()
+    };
+
+    for mode in [RoutingMode::Rule, RoutingMode::Global, RoutingMode::Direct] {
+        let routing = RoutingSettings {
+            mode,
+            custom_rules: vec![
+                RuleItem {
+                    id: "r-geosite".to_string(),
+                    rule_type: RuleType::GeoSite,
+                    pattern: "openai".to_string(),
+                    action: RuleAction::Proxy,
+                    enabled: true,
+                    sort_order: 0,
+                    description: None,
+                },
+                RuleItem {
+                    id: "r-geoip".to_string(),
+                    rule_type: RuleType::GeoIp,
+                    pattern: "telegram".to_string(),
+                    action: RuleAction::Proxy,
+                    enabled: true,
+                    sort_order: 1,
+                    description: None,
+                },
+            ],
+            ..RoutingSettings::default()
+        };
+
+        let sb_cfg = generate_core_config(
+            CoreType::SingBox,
+            &nodes,
+            &[],
+            &settings,
+            &dns,
+            &routing,
+            Some("node-vless"),
+        )
+        .expect("generate sing-box routing mode config");
+
+        let sb_path = temp_dir.join(format!("sb_mode_{mode:?}.json"));
+        std::fs::write(&sb_path, sb_cfg.as_bytes()).unwrap();
+        check_core_config(CoreType::SingBox, &sb_bin, &sb_path, &temp_dir)
+            .await
+            .expect("sing-box routing mode check must pass");
+
+        let mh_cfg = generate_core_config(
+            CoreType::Mihomo,
+            &nodes,
+            &[],
+            &settings,
+            &dns,
+            &routing,
+            Some("node-ss"),
+        )
+        .expect("generate mihomo routing mode config");
+
+        let mh_path = temp_dir.join(format!("mh_mode_{mode:?}.yaml"));
+        std::fs::write(&mh_path, mh_cfg.as_bytes()).unwrap();
+        check_core_config(CoreType::Mihomo, &mh_bin, &mh_path, &temp_dir)
+            .await
+            .expect("mihomo routing mode check must pass");
+    }
+
+    // Verify unsupported active nodes fail loudly rather than silent "direct" fallback
+    let rule_routing = RoutingSettings::default();
+    let sb_ssr_err = generate_core_config(
+        CoreType::SingBox,
+        &nodes,
+        &[],
+        &settings,
+        &dns,
+        &rule_routing,
+        Some("node-ssr"),
+    );
+    assert!(
+        sb_ssr_err.is_err(),
+        "sing-box must reject SSR as active node instead of emitting direct"
+    );
+
+    let mh_st_err = generate_core_config(
+        CoreType::Mihomo,
+        &nodes,
+        &[],
+        &settings,
+        &dns,
+        &rule_routing,
+        Some("node-shadowtls"),
+    );
+    assert!(
+        mh_st_err.is_err(),
+        "mihomo must reject ShadowTLS as active node"
+    );
+
+    let xr_hy2_err = generate_core_config(
+        CoreType::Xray,
+        &nodes,
+        &[],
+        &settings,
+        &dns,
+        &rule_routing,
+        Some("node-hy2"),
+    );
+    assert!(
+        xr_hy2_err.is_err(),
+        "xray must reject Hysteria2 as active node"
+    );
+}
+
+#[tokio::test]
+async fn test_mihomo_ss_obfs_map_duplicate_multiline_names_and_singbox_port_range() {
+    let sb_bin = locate_core(CoreType::SingBox);
+    let mh_bin = locate_core(CoreType::Mihomo);
+    if !sb_bin.exists() || !mh_bin.exists() {
+        return;
+    }
+
+    let temp_dir = std::env::temp_dir().join("novaproxy_test_fixes_regressions");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let ss_obfs_a = ProxyNode {
+        id: "dup-ss-11111111".to_string(),
+        name: "SameName\nEvil".to_string(),
+        server: "ss.example.invalid".to_string(),
+        port: 8388,
+        protocol: ProtocolType::Shadowsocks,
+        tls: None,
+        transport: None,
+        settings: ProtocolConfig::Shadowsocks(ShadowsocksConfig {
+            method: "aes-128-gcm".to_string(),
+            password: "pw".to_string(),
+            plugin: Some("obfs-local".to_string()),
+            plugin_opts: Some("obfs=http;obfs-host=cdn.example.invalid".to_string()),
+            uot: Some(false),
+        }),
+        subscription_id: None,
+        group_id: None,
+        latency: None,
+        dialer_proxy: Some("missing-dialer-id".to_string()),
+        preferred_core: None,
+        sort_order: 0,
+    };
+    let ss_obfs_b = ProxyNode {
+        id: "dup-ss-22222222".to_string(),
+        name: "SameName\nEvil".to_string(),
+        server: "ss2.example.invalid".to_string(),
+        port: 8389,
+        dialer_proxy: None,
+        sort_order: 1,
+        ..ss_obfs_a.clone()
+    };
+
+    let mh_nodes = vec![ss_obfs_a.clone(), ss_obfs_b.clone()];
+    let resolved = novaproxy_lib::generator::mihomo::resolve_mihomo_proxy_names(&mh_nodes);
+    assert_ne!(
+        resolved.get(&ss_obfs_a.id),
+        resolved.get(&ss_obfs_b.id),
+        "duplicate display names must be disambiguated for mihomo"
+    );
+
+    let routing = RoutingSettings {
+        mode: RoutingMode::Rule,
+        custom_rules: vec![
+            RuleItem {
+                id: "r-port-range".to_string(),
+                rule_type: RuleType::Port,
+                pattern: "8000-9000, 10000".to_string(),
+                action: RuleAction::Proxy,
+                enabled: true,
+                sort_order: 0,
+                description: None,
+            },
+            RuleItem {
+                id: "r-empty".to_string(),
+                rule_type: RuleType::Domain,
+                pattern: "   ".to_string(),
+                action: RuleAction::Block,
+                enabled: true,
+                sort_order: 1,
+                description: None,
+            },
+        ],
+        ..RoutingSettings::default()
+    };
+
+    let mh_cfg = generate_core_config(
+        CoreType::Mihomo,
+        &mh_nodes,
+        &[],
+        &AppSettings::default(),
+        &DnsSettings::default(),
+        &routing,
+        Some(&ss_obfs_a.id),
+    )
+    .expect("generate mihomo ss obfs yaml");
+    assert!(mh_cfg.contains("plugin: obfs"));
+    assert!(mh_cfg.contains("mode: \"http\""));
+    assert!(!mh_cfg.contains("missing-dialer-id"));
+
+    let mh_path = temp_dir.join("mh_ss_obfs_fix.yaml");
+    std::fs::write(&mh_path, mh_cfg.as_bytes()).unwrap();
+    check_core_config(CoreType::Mihomo, &mh_bin, &mh_path, &temp_dir)
+        .await
+        .expect("mihomo -t must accept SS obfs plugin-opts map + multiline escaped name");
+
+    let mut sb_nodes = sample_test_nodes();
+    sb_nodes[0].dialer_proxy = Some("missing-dialer-id".to_string());
+    let sb_cfg = generate_core_config(
+        CoreType::SingBox,
+        &sb_nodes,
+        &[],
+        &AppSettings::default(),
+        &DnsSettings::default(),
+        &routing,
+        Some("node-vless"),
+    )
+    .expect("generate sing-box port range rule");
+    assert!(sb_cfg.contains("8000:9000"));
+    assert!(!sb_cfg.contains("missing-dialer-id"));
+
+    let sb_path = temp_dir.join("sb_port_range_fix.json");
+    std::fs::write(&sb_path, sb_cfg.as_bytes()).unwrap();
+    check_core_config(CoreType::SingBox, &sb_bin, &sb_path, &temp_dir)
+        .await
+        .expect("sing-box check must accept normalized port_range 8000:9000");
 }

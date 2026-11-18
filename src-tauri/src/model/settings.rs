@@ -58,6 +58,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub active_node_id: Option<String>,
     pub auto_port_fallback: bool,
+    #[serde(default)]
+    pub register_clash_scheme: bool,
     pub language: String,
     pub theme: String,
 }
@@ -79,6 +81,7 @@ impl Default for AppSettings {
             system_proxy: false,
             active_node_id: None,
             auto_port_fallback: true,
+            register_clash_scheme: false,
             language: "zh-CN".to_string(),
             theme: "dark".to_string(),
         }

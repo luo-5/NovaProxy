@@ -14,6 +14,7 @@ NovaProxy 通过子进程隔离调度外部编译好的二进制程序，不与 
 | **mihomo** | [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) | **GPL-3.0-or-later** | 独立可执行文件 (`mihomo.exe`) | 经进程命令行 `-d` 启动，通过 RESTful Clash API 通信 |
 | **Xray-core** | [XTLS/Xray-core](https://github.com/XTLS/Xray-core) | **MPL-2.0** | 独立可执行文件 (`xray.exe`) | 经进程命令行 `run -c` 启动，负责特定协议本地中继 |
 | **Wintun** | [WireGuard/wintun](https://git.zx2c4.com/wintun/) | **MIT / BSD** | 动态链接库 (`wintun.dll`) | Windows TUN 虚拟网卡底层驱动 |
+| **hev-socks5-tunnel** | [heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) | **MIT** | JNI 共享库 (`libhev-socks5-tunnel.so`) | Android `VpnService` tun2socks 底层隧道转发库 |
 
 ---
 

@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import type { AppSettings, ProxyNode, RoutingMode } from "../types/bindings";
+import type {
+  AppSettings,
+  PlatformInfo,
+  ProxyNode,
+  RoutingMode,
+} from "../types/bindings";
 
 export type NavTab =
   | "dashboard"
@@ -46,6 +51,9 @@ interface AppState {
 
   totalTraffic: { up: number; down: number };
   setTotalTraffic: (total: { up: number; down: number }) => void;
+
+  platformInfo: PlatformInfo | null;
+  setPlatformInfo: (info: PlatformInfo) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -101,4 +109,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   totalTraffic: { up: 0, down: 0 },
   setTotalTraffic: (total) => set({ totalTraffic: total }),
+
+  platformInfo: null,
+  setPlatformInfo: (info) => set({ platformInfo: info }),
 }));

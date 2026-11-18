@@ -56,12 +56,30 @@ pub fn parse_anytls(uri: &str) -> ParseResult<ProxyNode> {
     let params = parse_query_map(&url);
     let name = extract_remarks(&url, &server, port);
 
-    let password = urlencoding::decode(url.username())
-        .map(|s| s.into_owned())
-        .unwrap_or_else(|_| url.username().to_string());
-    if password.is_empty() {
-        return Err(ParseError::MissingField("password"));
-    }
+    let password = url
+        .password()
+        .and_then(|p| {
+            let decoded = urlencoding::decode(p)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| p.to_string());
+            (!decoded.is_empty()).then_some(decoded)
+        })
+        .or_else(|| {
+            let raw_user = url.username();
+            if raw_user.is_empty() {
+                return None;
+            }
+            let decoded_user = urlencoding::decode(raw_user)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| raw_user.to_string());
+            if let Some((_, pass)) = decoded_user.split_once(':') {
+                (!pass.is_empty()).then_some(pass.to_string())
+            } else {
+                (!decoded_user.is_empty()).then_some(decoded_user)
+            }
+        })
+        .or_else(|| params.get("password").filter(|s| !s.is_empty()).cloned())
+        .ok_or(ParseError::MissingField("password"))?;
 
     let (transport, tls) = parse_v2ray_transport_and_tls(&params, true);
 
@@ -127,12 +145,30 @@ pub fn parse_shadowtls(uri: &str) -> ParseResult<ProxyNode> {
     let params = parse_query_map(&url);
     let name = extract_remarks(&url, &server, port);
 
-    let password = urlencoding::decode(url.username())
-        .map(|s| s.into_owned())
-        .unwrap_or_else(|_| url.username().to_string());
-    if password.is_empty() {
-        return Err(ParseError::MissingField("password"));
-    }
+    let password = url
+        .password()
+        .and_then(|p| {
+            let decoded = urlencoding::decode(p)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| p.to_string());
+            (!decoded.is_empty()).then_some(decoded)
+        })
+        .or_else(|| {
+            let raw_user = url.username();
+            if raw_user.is_empty() {
+                return None;
+            }
+            let decoded_user = urlencoding::decode(raw_user)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| raw_user.to_string());
+            if let Some((_, pass)) = decoded_user.split_once(':') {
+                (!pass.is_empty()).then_some(pass.to_string())
+            } else {
+                (!decoded_user.is_empty()).then_some(decoded_user)
+            }
+        })
+        .or_else(|| params.get("password").filter(|s| !s.is_empty()).cloned())
+        .ok_or(ParseError::MissingField("password"))?;
 
     let version = params
         .get("version")
@@ -387,7 +423,11 @@ pub fn parse_mieru(uri: &str) -> ParseResult<ProxyNode> {
             username,
             password,
             transport,
-            port_range: params.get("port_range").cloned(),
+            port_range: params
+                .get("port_range")
+                .or_else(|| params.get("port-range"))
+                .filter(|s| !s.trim().is_empty())
+                .cloned(),
             multiplexing: params.get("multiplexing").cloned(),
         }),
         subscription_id: None,
@@ -521,9 +561,22 @@ pub fn to_uri_socks5(node: &ProxyNode) -> ParseResult<String> {
         (Some(u), None) if !u.is_empty() => format!("{}@", urlencoding::encode(u)),
         _ => String::new(),
     };
+    let mut pairs: Vec<(&'static str, String)> = Vec::new();
+    if !cfg.udp {
+        pairs.push(("udp", "0".to_string()));
+    }
+    append_v2ray_transport_and_tls_params(&mut pairs, &None, &node.tls, false);
+    let query = encode_query_pairs(&pairs);
     let host = format_host_for_uri(&node.server);
     let remarks = encode_remarks(&node.name);
-    Ok(format!("socks5://{auth}{host}:{}#{remarks}", node.port))
+    if query.is_empty() {
+        Ok(format!("socks5://{auth}{host}:{}#{remarks}", node.port))
+    } else {
+        Ok(format!(
+            "socks5://{auth}{host}:{}?{query}#{remarks}",
+            node.port
+        ))
+    }
 }
 
 /// Parses `http://` or `https://` proxy share links
@@ -566,10 +619,8 @@ pub fn to_uri_http(node: &ProxyNode) -> ParseResult<String> {
         ProtocolConfig::Http(c) => c,
         _ => return Err(ParseError::InvalidUri("not an HTTP node".to_string())),
     };
-    let scheme = match &node.tls {
-        Some(t) if t.enabled => "https",
-        _ => "http",
-    };
+    let is_https = matches!(&node.tls, Some(t) if t.enabled);
+    let scheme = if is_https { "https" } else { "http" };
     let auth = match (&cfg.username, &cfg.password) {
         (Some(u), Some(p)) if !u.is_empty() => {
             format!("{}:{}@", urlencoding::encode(u), urlencoding::encode(p))
@@ -577,7 +628,17 @@ pub fn to_uri_http(node: &ProxyNode) -> ParseResult<String> {
         (Some(u), None) if !u.is_empty() => format!("{}@", urlencoding::encode(u)),
         _ => String::new(),
     };
+    let mut pairs: Vec<(&'static str, String)> = Vec::new();
+    append_v2ray_transport_and_tls_params(&mut pairs, &None, &node.tls, is_https);
+    let query = encode_query_pairs(&pairs);
     let host = format_host_for_uri(&node.server);
     let remarks = encode_remarks(&node.name);
-    Ok(format!("{scheme}://{auth}{host}:{}#{remarks}", node.port))
+    if query.is_empty() {
+        Ok(format!("{scheme}://{auth}{host}:{}#{remarks}", node.port))
+    } else {
+        Ok(format!(
+            "{scheme}://{auth}{host}:{}?{query}#{remarks}",
+            node.port
+        ))
+    }
 }

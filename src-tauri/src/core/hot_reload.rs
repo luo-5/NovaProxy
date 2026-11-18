@@ -14,6 +14,7 @@ pub async fn try_hot_switch_proxy(
     node_name: &str,
 ) -> Result<(), String> {
     let client = Client::builder()
+        .no_proxy()
         .timeout(Duration::from_millis(1500))
         .build()
         .map_err(|e| e.to_string())?;
@@ -53,6 +54,7 @@ pub async fn try_hot_reload_config(
     config_path: impl AsRef<Path>,
 ) -> Result<(), String> {
     let client = Client::builder()
+        .no_proxy()
         .timeout(Duration::from_millis(2000))
         .build()
         .map_err(|e| e.to_string())?;
@@ -83,20 +85,29 @@ pub async fn try_hot_reload_config(
 }
 
 /// Smart proxy switcher that attempts common group names (`proxy`, `PROXY`, `GLOBAL`)
-/// with both node ID and node display name.
-pub async fn try_smart_hot_switch(
+/// against an ordered list of candidate proxy tags/names (ignoring empty or duplicate entries).
+pub async fn try_smart_hot_switch_candidates(
     clash_api_port: u16,
     clash_api_secret: Option<&str>,
-    node_id: &str,
-    node_name: &str,
+    candidates: &[&str],
 ) -> Result<(), String> {
     let groups = ["proxy", "PROXY", "GLOBAL"];
-    let candidates = [node_id, node_name];
+    let mut unique_candidates: Vec<&str> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() && !unique_candidates.contains(&trimmed) {
+            unique_candidates.push(trimmed);
+        }
+    }
+
+    if unique_candidates.is_empty() {
+        return Err("No valid proxy candidates supplied".to_string());
+    }
 
     let mut last_err = String::from("No candidate groups responded");
 
     for group in groups {
-        for candidate in candidates {
+        for candidate in &unique_candidates {
             match try_hot_switch_proxy(clash_api_port, clash_api_secret, group, candidate).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
@@ -107,6 +118,17 @@ pub async fn try_smart_hot_switch(
     }
 
     Err(last_err)
+}
+
+/// Smart proxy switcher that attempts common group names (`proxy`, `PROXY`, `GLOBAL`)
+/// with both node ID and node display name.
+pub async fn try_smart_hot_switch(
+    clash_api_port: u16,
+    clash_api_secret: Option<&str>,
+    node_id: &str,
+    node_name: &str,
+) -> Result<(), String> {
+    try_smart_hot_switch_candidates(clash_api_port, clash_api_secret, &[node_id, node_name]).await
 }
 
 #[cfg(test)]

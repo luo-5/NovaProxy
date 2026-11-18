@@ -576,3 +576,215 @@ async fn test_fetch_and_parse_subscription_http_headers_and_retry() {
 
     let _ = server_task.await;
 }
+
+#[test]
+fn test_hysteria2_port_hopping_singbox_json_and_clash_groups_dedup() {
+    use novaproxy_lib::model::subscription::GroupType;
+    use novaproxy_lib::parser::{node_to_share_link, parse_share_link};
+
+    // 1. Hysteria2 URI with mport + hop-interval + pinSHA256 must NOT put pinSHA256 into TLS fingerprint
+    let hy2_uri = "hysteria2://testpass@example.invalid:443?mport=20000-50000&hop-interval=30s&sni=example.invalid&pinSHA256=AA:BB:CC:DD&insecure=1#Hy2Hop";
+    let parsed_hy2 = parse_share_link(hy2_uri).expect("parse hy2 port-hop uri");
+    assert_eq!(
+        parsed_hy2
+            .tls
+            .as_ref()
+            .and_then(|t| t.fingerprint.as_deref()),
+        None
+    );
+    match &parsed_hy2.settings {
+        novaproxy_lib::model::ProtocolConfig::Hysteria2(h) => {
+            assert_eq!(h.ports.as_deref(), Some("20000-50000"));
+            assert_eq!(h.hop_interval, Some(30));
+        }
+        other => panic!("unexpected settings: {other:?}"),
+    }
+    let reencoded = node_to_share_link(&parsed_hy2).expect("re-encode hy2");
+    assert!(reencoded.contains("mport=20000-50000"));
+    assert!(reencoded.contains("hop_interval=30"));
+
+    // 2. sing-box JSON hysteria2 with omitted server_port + server_ports + hop_interval
+    let sb_hy2_json = r#"{
+        "outbounds": [
+            {
+                "type": "hysteria2",
+                "tag": "SB-Hy2-Hop",
+                "server": "example.invalid",
+                "server_ports": ["20000:30000", "40000:45000"],
+                "hop_interval": "45s",
+                "password": "secret",
+                "tls": { "enabled": true, "server_name": "example.invalid" }
+            }
+        ]
+    }"#;
+    let sb_report = parse_subscription_content(sb_hy2_json).expect("parse singbox hy2 json");
+    assert_eq!(sb_report.nodes.len(), 1);
+    assert_eq!(sb_report.nodes[0].port, 20000);
+    match &sb_report.nodes[0].settings {
+        novaproxy_lib::model::ProtocolConfig::Hysteria2(h) => {
+            assert_eq!(h.ports.as_deref(), Some("20000-30000,40000-45000"));
+            assert_eq!(h.hop_interval, Some(45));
+        }
+        other => panic!("unexpected settings: {other:?}"),
+    }
+
+    // 3. Clash YAML proxy-groups (url-test, fallback, select with duplicate proxy fingerprint)
+    let clash_groups_yaml = r#"
+proxies:
+  - name: NodeA
+    type: ss
+    server: s1.example.invalid
+    port: 8388
+    cipher: aes-128-gcm
+    password: pw1
+  - name: NodeA-Duplicate
+    type: ss
+    server: s1.example.invalid
+    port: 8388
+    cipher: aes-128-gcm
+    password: pw1
+  - name: NodeB
+    type: hysteria2
+    server: s2.example.invalid
+    port: 443
+    mport: 20000-50000
+    hop_interval: 30s
+    password: pw2
+    sni: s2.example.invalid
+proxy-groups:
+  - name: Auto-Fast
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 180
+    proxies:
+      - NodeA
+      - NodeB
+  - name: Failover
+    type: fallback
+    url: http://cp.cloudflare.com/generate_204
+    interval: 60
+    proxies:
+      - NodeA-Duplicate
+      - NodeB
+  - name: Select-Main
+    type: select
+    proxies:
+      - Auto-Fast
+      - DIRECT
+rules:
+  - MATCH,Select-Main
+"#;
+    let report = parse_subscription_content(clash_groups_yaml).expect("parse clash yaml groups");
+    assert_eq!(report.format, SubscriptionFormat::ClashYaml);
+    // Duplicate NodeA-Duplicate deduplicated away -> 2 surviving nodes
+    assert_eq!(report.nodes.len(), 2);
+    assert_eq!(report.groups.len(), 3);
+
+    let valid_ids: std::collections::HashSet<&str> =
+        report.nodes.iter().map(|n| n.id.as_str()).collect();
+    for grp in &report.groups {
+        assert!(!grp.node_ids.is_empty());
+        for nid in &grp.node_ids {
+            assert!(
+                valid_ids.contains(nid.as_str()),
+                "group {} contains dangling node_id {nid}",
+                grp.name
+            );
+        }
+    }
+    assert_eq!(report.groups[0].group_type, GroupType::UrlTest);
+    assert_eq!(report.groups[0].interval_secs, Some(180));
+    assert_eq!(report.groups[1].group_type, GroupType::Fallback);
+    assert_eq!(report.groups[2].group_type, GroupType::Selector);
+}
+
+#[test]
+fn test_fingerprint_distinguishes_cdn_sni_and_ws_path_variants() {
+    let sub = "\
+vless://11111111-1111-1111-1111-111111111111@cdn.example.invalid:443?encryption=none&security=tls&type=ws&sni=node1.example.invalid&path=%2Fws-a#Edge-A
+vless://11111111-1111-1111-1111-111111111111@cdn.example.invalid:443?encryption=none&security=tls&type=ws&sni=node2.example.invalid&path=%2Fws-b#Edge-B
+";
+    let report = parse_subscription_content(sub).expect("parse cdn variants");
+    assert_eq!(report.nodes.len(), 2);
+    assert_ne!(
+        report.nodes[0].compute_fingerprint(),
+        report.nodes[1].compute_fingerprint()
+    );
+}
+
+#[test]
+fn test_socks5_http_tls_and_anytls_mieru_variants_roundtrip() {
+    let socks_tls =
+        "socks5://user:pass@proxy.example.invalid:1080?security=tls&sni=tls.example.invalid&allowInsecure=1#SocksTLS";
+    let node_s = parse_share_link(socks_tls).expect("parse socks5 tls");
+    assert_eq!(node_s.tls.as_ref().map(|t| t.enabled), Some(true));
+    let exported_s = node_to_share_link(&node_s).expect("export socks5 tls");
+    let reparsed_s = parse_share_link(&exported_s).expect("reparse socks5 tls");
+    assert_eq!(reparsed_s.tls, node_s.tls);
+
+    let https_node = parse_share_link(
+        "https://u:p@https.example.invalid:8443?sni=web.example.invalid&fp=chrome#WebProxy",
+    )
+    .expect("parse https with params");
+    let exported_h = node_to_share_link(&https_node).expect("export https");
+    let reparsed_h = parse_share_link(&exported_h).expect("reparse https");
+    assert_eq!(reparsed_h.tls, https_node.tls);
+
+    let anytls_userpass = parse_share_link(
+        "anytls://user:topsecret@any.example.invalid:443?sni=any.example.invalid#AnyUP",
+    )
+    .expect("parse anytls user:pass");
+    match anytls_userpass.settings {
+        ProtocolConfig::AnyTls(c) => assert_eq!(c.password, "topsecret"),
+        other => panic!("unexpected settings: {other:?}"),
+    }
+
+    let anytls_query = parse_share_link(
+        "anytls://any.example.invalid:443?password=qsecret&sni=any.example.invalid#AnyQ",
+    )
+    .expect("parse anytls ?password=");
+    match anytls_query.settings {
+        ProtocolConfig::AnyTls(c) => assert_eq!(c.password, "qsecret"),
+        other => panic!("unexpected settings: {other:?}"),
+    }
+
+    let mieru = parse_share_link(
+        "mieru://alice:pw123@m.example.invalid:8080?transport=TCP&port-range=8000-8010#Mieru",
+    )
+    .expect("parse mieru port-range");
+    match mieru.settings {
+        ProtocolConfig::Mieru(c) => assert_eq!(c.port_range.as_deref(), Some("8000-8010")),
+        other => panic!("unexpected settings: {other:?}"),
+    }
+}
+
+#[test]
+fn test_clash_yaml_wireguard_peers_and_reserved() {
+    let yaml = r#"
+proxies:
+  - name: WG-Peers
+    type: wireguard
+    private-key: "privkey=="
+    ip: 10.0.0.2
+    mtu: 1420
+    peers:
+      - server: wg.example.invalid
+        port: 51820
+        public-key: "pubkey=="
+        pre-shared-key: "psk=="
+        reserved: [12, 34, 56]
+"#;
+    let report = parse_subscription_content(yaml).expect("parse clash wireguard peers");
+    assert_eq!(report.nodes.len(), 1);
+    let wg = &report.nodes[0];
+    assert_eq!(wg.server, "wg.example.invalid");
+    assert_eq!(wg.port, 51820);
+    match &wg.settings {
+        ProtocolConfig::WireGuard(c) => {
+            assert_eq!(c.public_key, "pubkey==");
+            assert_eq!(c.preshared_key.as_deref(), Some("psk=="));
+            assert_eq!(c.reserved, Some([12, 34, 56]));
+        }
+        other => panic!("expected WireGuard, got {other:?}"),
+    }
+}

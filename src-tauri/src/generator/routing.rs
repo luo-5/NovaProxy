@@ -3,16 +3,62 @@
 use crate::model::routing::{RoutingSettings, RuleAction, RuleItem, RuleType};
 use crate::model::settings::RoutingMode;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
-/// Generates sing-box 1.14 route configuration block
+const TUN_BYPASS_PROCESSES: &[&str] = &[
+    "NovaProxy.exe",
+    "novaproxy.exe",
+    "sing-box.exe",
+    "mihomo.exe",
+    "xray.exe",
+];
+
+fn normalize_geosite_tag(pattern: &str) -> String {
+    let cleaned = pattern
+        .trim()
+        .trim_start_matches("geosite:")
+        .trim_start_matches("geosite-")
+        .to_ascii_lowercase();
+    format!("geosite-{cleaned}")
+}
+
+fn normalize_geoip_tag(pattern: &str) -> String {
+    let cleaned = pattern
+        .trim()
+        .trim_start_matches("geoip:")
+        .trim_start_matches("geoip-")
+        .to_ascii_lowercase();
+    format!("geoip-{cleaned}")
+}
+
+/// Generates sing-box 1.14 route configuration block without TUN process exclusions.
 pub fn generate_singbox_route(routing: &RoutingSettings, proxy_tag: &str) -> Value {
+    generate_singbox_route_with_options(routing, proxy_tag, false)
+}
+
+/// Generates sing-box 1.14 route configuration block with optional TUN process exclusions.
+pub fn generate_singbox_route_with_options(
+    routing: &RoutingSettings,
+    proxy_tag: &str,
+    tun_mode: bool,
+) -> Value {
     let mut rules = Vec::new();
 
     // 1. Sniff and hijack DNS
     rules.push(json!({ "action": "sniff" }));
     rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
 
+    if tun_mode && routing.mode != RoutingMode::Direct {
+        rules.push(json!({
+            "process_name": TUN_BYPASS_PROCESSES,
+            "outbound": "direct"
+        }));
+    }
+
     let mut rule_sets = Vec::new();
+    let mut registered_tags = BTreeSet::new();
+    let mut extra_geosite_tags = BTreeSet::new();
+    let mut extra_geoip_tags = BTreeSet::new();
 
     match routing.mode {
         RoutingMode::Direct => {
@@ -32,8 +78,18 @@ pub fn generate_singbox_route(routing: &RoutingSettings, proxy_tag: &str) -> Val
 
             // Custom user-defined rules
             for item in &routing.custom_rules {
-                if !item.enabled {
+                if !item.enabled || item.pattern.trim().is_empty() {
                     continue;
+                }
+                let clean_pat = item.pattern.trim();
+                match item.rule_type {
+                    RuleType::GeoSite => {
+                        extra_geosite_tags.insert(normalize_geosite_tag(clean_pat));
+                    }
+                    RuleType::GeoIp => {
+                        extra_geoip_tags.insert(normalize_geoip_tag(clean_pat));
+                    }
+                    _ => {}
                 }
                 if let Some(rule_val) = compile_singbox_rule_item(item, proxy_tag) {
                     rules.push(rule_val);
@@ -46,12 +102,13 @@ pub fn generate_singbox_route(routing: &RoutingSettings, proxy_tag: &str) -> Val
                     "rule_set": ["geosite-ads"],
                     "action": "reject"
                 }));
+                registered_tags.insert("geosite-ads".to_string());
                 rule_sets.push(json!({
                     "type": "remote",
                     "tag": "geosite-ads",
                     "format": "binary",
                     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
-                    "download_detour": "direct",
+                    "download_detour": proxy_tag,
                     "update_interval": "24h"
                 }));
             }
@@ -62,20 +119,54 @@ pub fn generate_singbox_route(routing: &RoutingSettings, proxy_tag: &str) -> Val
                     "rule_set": ["geosite-cn", "geoip-cn"],
                     "outbound": "direct"
                 }));
+                registered_tags.insert("geosite-cn".to_string());
                 rule_sets.push(json!({
                     "type": "remote",
                     "tag": "geosite-cn",
                     "format": "binary",
                     "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
-                    "download_detour": "direct",
+                    "download_detour": proxy_tag,
                     "update_interval": "24h"
                 }));
+                registered_tags.insert("geoip-cn".to_string());
                 rule_sets.push(json!({
                     "type": "remote",
                     "tag": "geoip-cn",
                     "format": "binary",
                     "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-                    "download_detour": "direct",
+                    "download_detour": proxy_tag,
+                    "update_interval": "24h"
+                }));
+            }
+
+            for tag in extra_geosite_tags {
+                if !registered_tags.insert(tag.clone()) {
+                    continue;
+                }
+                let url = if tag == "geosite-ads" {
+                    "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs".to_string()
+                } else {
+                    format!("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/{tag}.srs")
+                };
+                rule_sets.push(json!({
+                    "type": "remote",
+                    "tag": tag,
+                    "format": "binary",
+                    "url": url,
+                    "download_detour": proxy_tag,
+                    "update_interval": "24h"
+                }));
+            }
+            for tag in extra_geoip_tags {
+                if !registered_tags.insert(tag.clone()) {
+                    continue;
+                }
+                rule_sets.push(json!({
+                    "type": "remote",
+                    "tag": tag,
+                    "format": "binary",
+                    "url": format!("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/{tag}.srs"),
+                    "download_detour": proxy_tag,
                     "update_interval": "24h"
                 }));
             }
@@ -102,6 +193,11 @@ pub fn generate_singbox_route(routing: &RoutingSettings, proxy_tag: &str) -> Val
 }
 
 fn compile_singbox_rule_item(item: &RuleItem, default_proxy_tag: &str) -> Option<Value> {
+    let clean_pat = item.pattern.trim();
+    if clean_pat.is_empty() {
+        return None;
+    }
+
     let mut map = serde_json::Map::new();
 
     let target = item.action.target_tag(default_proxy_tag);
@@ -113,41 +209,61 @@ fn compile_singbox_rule_item(item: &RuleItem, default_proxy_tag: &str) -> Option
 
     match item.rule_type {
         RuleType::Domain => {
-            map.insert("domain".to_string(), json!([item.pattern]));
+            map.insert("domain".to_string(), json!([clean_pat]));
         }
         RuleType::DomainSuffix => {
-            let pat = item.pattern.trim_start_matches('.');
+            let pat = clean_pat.trim_start_matches('.');
             map.insert("domain_suffix".to_string(), json!([pat]));
         }
         RuleType::DomainKeyword => {
-            map.insert("domain_keyword".to_string(), json!([item.pattern]));
+            map.insert("domain_keyword".to_string(), json!([clean_pat]));
         }
         RuleType::DomainRegex => {
-            map.insert("domain_regex".to_string(), json!([item.pattern]));
+            map.insert("domain_regex".to_string(), json!([clean_pat]));
         }
         RuleType::IpCidr => {
-            map.insert("ip_cidr".to_string(), json!([item.pattern]));
+            map.insert("ip_cidr".to_string(), json!([clean_pat]));
         }
         RuleType::ProcessName => {
-            map.insert("process_name".to_string(), json!([item.pattern]));
+            map.insert("process_name".to_string(), json!([clean_pat]));
         }
         RuleType::Port => {
-            if let Ok(p) = item.pattern.trim().parse::<u16>() {
-                map.insert("port".to_string(), json!([p]));
-            } else {
-                map.insert("port_range".to_string(), json!([item.pattern]));
+            let mut single_ports = Vec::new();
+            let mut port_ranges = Vec::new();
+            for part in clean_pat
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Ok(p) = part.parse::<u16>() {
+                    single_ports.push(p);
+                } else {
+                    let normalized = part.replace('-', ":");
+                    if normalized.contains(':') {
+                        port_ranges.push(normalized);
+                    }
+                }
+            }
+            if !single_ports.is_empty() {
+                map.insert("port".to_string(), json!(single_ports));
+            }
+            if !port_ranges.is_empty() {
+                map.insert("port_range".to_string(), json!(port_ranges));
+            }
+            if single_ports.is_empty() && port_ranges.is_empty() {
+                return None;
             }
         }
         RuleType::GeoSite => {
             map.insert(
                 "rule_set".to_string(),
-                json!([format!("geosite-{}", item.pattern)]),
+                json!([normalize_geosite_tag(clean_pat)]),
             );
         }
         RuleType::GeoIp => {
             map.insert(
                 "rule_set".to_string(),
-                json!([format!("geoip-{}", item.pattern)]),
+                json!([normalize_geoip_tag(clean_pat)]),
             );
         }
     }
@@ -155,8 +271,17 @@ fn compile_singbox_rule_item(item: &RuleItem, default_proxy_tag: &str) -> Option
     Some(Value::Object(map))
 }
 
-/// Generates Mihomo (Clash.Meta) YAML rule-providers and rules
+/// Generates Mihomo (Clash.Meta) YAML rule-providers and rules without TUN process exclusions.
 pub fn generate_mihomo_rules_yaml(routing: &RoutingSettings, proxy_tag: &str) -> String {
+    generate_mihomo_rules_yaml_with_options(routing, proxy_tag, false)
+}
+
+/// Generates Mihomo (Clash.Meta) YAML rule-providers and rules with optional TUN process exclusions.
+pub fn generate_mihomo_rules_yaml_with_options(
+    routing: &RoutingSettings,
+    proxy_tag: &str,
+    tun_mode: bool,
+) -> String {
     let mut out = String::new();
 
     // 1. rule-providers (when in Rule mode)
@@ -191,6 +316,11 @@ pub fn generate_mihomo_rules_yaml(routing: &RoutingSettings, proxy_tag: &str) ->
 
     // 2. rules
     out.push_str("rules:\n");
+    if tun_mode && routing.mode != RoutingMode::Direct {
+        for proc_name in TUN_BYPASS_PROCESSES {
+            out.push_str(&format!("  - PROCESS-NAME,{proc_name},DIRECT\n"));
+        }
+    }
     match routing.mode {
         RoutingMode::Direct => {
             out.push_str("  - MATCH,DIRECT\n");
@@ -210,7 +340,8 @@ pub fn generate_mihomo_rules_yaml(routing: &RoutingSettings, proxy_tag: &str) ->
             }
 
             for item in &routing.custom_rules {
-                if !item.enabled {
+                let clean_pat = item.pattern.trim();
+                if !item.enabled || clean_pat.is_empty() {
                     continue;
                 }
                 let target = match item.action {
@@ -221,28 +352,39 @@ pub fn generate_mihomo_rules_yaml(routing: &RoutingSettings, proxy_tag: &str) ->
                 };
 
                 let line = match item.rule_type {
-                    RuleType::Domain => format!("  - DOMAIN,{},{}\n", item.pattern, target),
+                    RuleType::Domain => format!("  - DOMAIN,{},{}\n", clean_pat, target),
                     RuleType::DomainSuffix => format!(
                         "  - DOMAIN-SUFFIX,{},{}\n",
-                        item.pattern.trim_start_matches('.'),
+                        clean_pat.trim_start_matches('.'),
                         target
                     ),
                     RuleType::DomainKeyword => {
-                        format!("  - DOMAIN-KEYWORD,{},{}\n", item.pattern, target)
+                        format!("  - DOMAIN-KEYWORD,{},{}\n", clean_pat, target)
                     }
                     RuleType::DomainRegex => {
-                        format!("  - DOMAIN-REGEX,{},{}\n", item.pattern, target)
+                        format!("  - DOMAIN-REGEX,{},{}\n", clean_pat, target)
                     }
                     RuleType::IpCidr => {
-                        format!("  - IP-CIDR,{},{},no-resolve\n", item.pattern, target)
+                        format!("  - IP-CIDR,{},{},no-resolve\n", clean_pat, target)
                     }
                     RuleType::ProcessName => {
-                        format!("  - PROCESS-NAME,{},{}\n", item.pattern, target)
+                        format!("  - PROCESS-NAME,{},{}\n", clean_pat, target)
                     }
-                    RuleType::Port => format!("  - DST-PORT,{},{}\n", item.pattern, target),
-                    RuleType::GeoSite => format!("  - GEOSITE,{},{}\n", item.pattern, target),
+                    RuleType::Port => {
+                        let mut lines = String::new();
+                        for part in clean_pat
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            let normalized = part.replace(':', "-");
+                            lines.push_str(&format!("  - DST-PORT,{},{}\n", normalized, target));
+                        }
+                        lines
+                    }
+                    RuleType::GeoSite => format!("  - GEOSITE,{},{}\n", clean_pat, target),
                     RuleType::GeoIp => {
-                        format!("  - GEOIP,{},{},no-resolve\n", item.pattern, target)
+                        format!("  - GEOIP,{},{},no-resolve\n", clean_pat, target)
                     }
                 };
                 out.push_str(&line);
@@ -301,7 +443,8 @@ pub fn generate_xray_routing(routing: &RoutingSettings, proxy_tag: &str) -> Valu
             }
 
             for item in &routing.custom_rules {
-                if !item.enabled {
+                let clean_pat = item.pattern.trim();
+                if !item.enabled || clean_pat.is_empty() {
                     continue;
                 }
                 let target = match item.action {
@@ -315,44 +458,51 @@ pub fn generate_xray_routing(routing: &RoutingSettings, proxy_tag: &str) -> Valu
                     RuleType::Domain => {
                         rules.push(json!({
                             "type": "field",
-                            "domain": [format!("full:{}", item.pattern)],
+                            "domain": [format!("full:{}", clean_pat)],
                             "outboundTag": target
                         }));
                     }
                     RuleType::DomainSuffix => {
                         rules.push(json!({
                             "type": "field",
-                            "domain": [format!("domain:{}", item.pattern.trim_start_matches('.'))],
+                            "domain": [format!("domain:{}", clean_pat.trim_start_matches('.'))],
                             "outboundTag": target
                         }));
                     }
                     RuleType::DomainKeyword => {
                         rules.push(json!({
                             "type": "field",
-                            "domain": [format!("keyword:{}", item.pattern)],
+                            "domain": [format!("keyword:{}", clean_pat)],
                             "outboundTag": target
                         }));
                     }
                     RuleType::DomainRegex => {
                         rules.push(json!({
                             "type": "field",
-                            "domain": [format!("regexp:{}", item.pattern)],
+                            "domain": [format!("regexp:{}", clean_pat)],
                             "outboundTag": target
                         }));
                     }
                     RuleType::IpCidr => {
                         rules.push(json!({
                             "type": "field",
-                            "ip": [item.pattern],
+                            "ip": [clean_pat],
                             "outboundTag": target
                         }));
                     }
                     RuleType::Port => {
-                        rules.push(json!({
-                            "type": "field",
-                            "port": item.pattern,
-                            "outboundTag": target
-                        }));
+                        let cleaned: Vec<String> = clean_pat
+                            .split(',')
+                            .map(|s| s.trim().replace(':', "-"))
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if !cleaned.is_empty() {
+                            rules.push(json!({
+                                "type": "field",
+                                "port": cleaned.join(","),
+                                "outboundTag": target
+                            }));
+                        }
                     }
                     _ => {}
                 }

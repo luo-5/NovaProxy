@@ -86,10 +86,58 @@ pub fn decode_qr_from_screen() -> ParseResult<Vec<String>> {
         let gray = win32_screen_capture::capture_virtual_screen_gray()?;
         decode_qr_from_gray_image(gray)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let tmp = std::env::temp_dir().join(format!("novaproxy_qr_{}.png", uuid::Uuid::new_v4()));
+        let status = std::process::Command::new("screencapture")
+            .args(["-x", "-t", "png"])
+            .arg(&tmp)
+            .status()
+            .map_err(|e| ParseError::QrCode(format!("screencapture failed: {e}")))?;
+        let bytes = std::fs::read(&tmp)
+            .map_err(|e| ParseError::QrCode(format!("Failed to read screenshot: {e}")));
+        let _ = std::fs::remove_file(&tmp);
+        if !status.success() {
+            return Err(ParseError::QrCode(
+                "macOS screen capture failed".to_string(),
+            ));
+        }
+        decode_qr_from_image_bytes(&bytes?)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let tmp = std::env::temp_dir().join(format!("novaproxy_qr_{}.png", uuid::Uuid::new_v4()));
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let candidates: [(&str, Vec<&str>); 4] = [
+            ("grim", vec![&tmp_str]),
+            ("gnome-screenshot", vec!["-f", &tmp_str]),
+            ("scrot", vec![&tmp_str]),
+            ("import", vec!["-window", "root", &tmp_str]),
+        ];
+        let mut captured = false;
+        for (tool, args) in candidates {
+            if let Ok(st) = std::process::Command::new(tool).args(&args).status() {
+                if st.success() && tmp.exists() {
+                    captured = true;
+                    break;
+                }
+            }
+        }
+        if !captured {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ParseError::QrCode(
+                "No Linux screen capture tool succeeded (install grim, gnome-screenshot, scrot, or imagemagick)".to_string(),
+            ));
+        }
+        let bytes = std::fs::read(&tmp)
+            .map_err(|e| ParseError::QrCode(format!("Failed to read screenshot: {e}")));
+        let _ = std::fs::remove_file(&tmp);
+        decode_qr_from_image_bytes(&bytes?)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         Err(ParseError::QrCode(
-            "Screen capture is only supported on Windows".to_string(),
+            "Screen QR capture is not available on this platform; please import an image or paste a link".to_string(),
         ))
     }
 }

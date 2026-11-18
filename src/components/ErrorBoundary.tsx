@@ -1,5 +1,6 @@
 import { Component, ErrorInfo, ReactNode } from "react";
 import { AlertTriangle, RefreshCw, Copy, Check } from "lucide-react";
+import { logFrontendEvent } from "../lib/ipc";
 
 interface Props {
   children: ReactNode;
@@ -32,6 +33,11 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("Uncaught runtime error in React UI:", error, errorInfo);
+    void logFrontendEvent(
+      "error",
+      "ErrorBoundary",
+      `${error.name}: ${error.message}${errorInfo.componentStack ? ` | ${errorInfo.componentStack.trim().slice(0, 400)}` : ""}`
+    );
     this.setState({ errorInfo });
   }
 

@@ -1,10 +1,11 @@
 # 进度记录与交接清单
 
 ## 当前状态
-- **当前阶段**：全部阶段 (P0 ~ P7) 已全部圆满完成！🎉
-- **当前执行模型**：Gemini-3.8-flash（全量任务审计与技术交接文档见 docs/FLASH_AUDIT_LOG.md 与 docs/FLASH_AUDIT_LOG.json）
-- **下一动作**：可切回 Gemini-4-Argon 对 P3 ~ P7 所有代码模块与架构决策进行全量审核/验收
-- **版本产物**：NovaProxy v0.1.0 (Ready for Release)
+- **当前阶段**：P0 ~ P8 全部完成 + **P9 四端跨平台兼容（Windows / macOS / Linux / Android APK）与全链路持久化日志/性能遥测诊断系统** 已完成并完成双端实测验证
+- **当前执行模型**：Antigravity (全平台跨端兼容架构、Android VpnService + hev-socks5-tunnel 原生插件、持久化滚动日志、性能遥测与优化洞察台)
+- **下一动作**：桌面端可直接运行 `novaproxy.exe` 或打包；Android 端可直接安装 `app-universal-debug.apk`；打 Tag `v*` 即可触发 GitHub Actions 产出 Windows / macOS / Linux / Android 全四平台安装包
+- **版本产物**：NovaProxy v0.0.1（开源首发版本；已实测生成并验证 Windows `novaproxy.exe` 与 Android `app-universal-debug.apk`）
+- **最新审计报告**：参见 [AUDIT_AND_HARDENING_REPORT.md](./AUDIT_AND_HARDENING_REPORT.md)
 
 ---
 
@@ -121,5 +122,41 @@
 
 ---
 
+## 决策与审计补充（2026-11-16 P8 全量审计与可发布级加固）
+- **2026-11-16 P8**：
+  - 修复 Hysteria 2 端口跳跃（`server_ports` / `hop_interval` 与 `ports` / `hop-interval`）在生成器中被忽略的问题，修复 `generator/dns.rs` 对 sing-box 1.14.4 直连 DNS 服务器误写 `"detour": "direct"` 导致启动致命退出的问题。
+  - 接通 `CoreManager::plan_start_request` 多内核自动选核与协同中继（支持 Xray 上游 + sing-box 前置协同、clash `proxy-groups` 通过 `Database::sync_groups` 持久化），清除 `monitor/traffic.rs` 与 `monitor/connections.rs` 占位 Stub，解决 Clash `/traffic` chunked NDJSON 阻塞和 `reqwest` 本地系统代理回环问题。
+  - 完善 `monitor/latency.rs`（有界 TCP Ping + 真实代理 URL 延迟测速，支持单节点临时内核 SOCKS5 204 端到端探测）与 `monitor/health.rs`（运行期真实代理探活、cooldown 防抖动、`run_loop` 脱离同步 Setup 线程 panic）。
+  - 完成非测试 `.unwrap()` / `.expect()` 清零（扫描 `src-tauri/src/` 0 命中），实现 Windows 单实例命名互斥锁与本地 IPC 唤醒、opt-in `clash://` 协议关联、`sc.exe` 服务状态探测、`WintunStatus` 诊断与安全退出 IPC/子进程/WinINet 清理。
+  - 前端补全 `Proxies.tsx` 虚拟滚动与 TCP/URL 双模式及 Clash 策略组筛选、`Rules.tsx` 自定义规则拖拽重排、`Settings.tsx` 内核版本/在线更新器/TUN 服务检测/`clash://` 开关与 Toast 提示、`Dashboard.tsx` 协同中继显示及 Vite 分包优化。
+  - 全量验证全绿：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（73/73 通过，含新增 `e2e_workflow_test.rs`）、`pnpm lint`、`pnpm tsc --noEmit`、`pnpm test`（10/10 通过）、`pnpm build`、`pnpm tauri build --debug --no-bundle` 与 `novaproxy.exe` 启动/窗口/安全退出实测。
+- **2026-11-17 P8 深度排错加固（Round 2 全面审核）**：
+  - **Tauri 2 运行时权限补全**：补充 `src-tauri/capabilities/default.json`（为 `main` 窗口授权 `core:default` 与 `shell:allow-open`），修复构建期 `gen/schemas/capabilities.json` 为空导致前端无法接收 `core://log`、`core://status`、`app://deep-link` 事件的隐性故障。
+  - **后端多处隐蔽缺陷修复**：
+    - `model/node.rs`：将 Hy2 跳跃端口、传输层参数、TLS SNI 与 Reality PublicKey 纳入 `compute_fingerprint()`，避免同域名/UUID 的不同 CDN/SNI 变体在订阅同步时误判重复合并。
+    - `system/sysproxy.rs` & `commands/mod.rs`：修正停止内核停流黑洞与外部代理误覆盖——启动/重启同步 WinINet，停止内核自动还原基线，未运行内核时开启系统代理仅持久化偏好而不接管 WinINet；无基线且未激活时 `restore_original()` 不误清外部代理；删除节点/订阅同步清理失效的 `active_node_id`。
+    - `core/{manager.rs, hot_reload.rs, process.rs}` & `monitor/{health.rs, latency.rs}` & `generator/{mod.rs, mihomo.rs, singbox.rs, routing.rs}`：新增 `config_generation` / `mark_config_dirty()` 追踪配置变更防止基于陈旧配置错误热切；导出并接入 `resolve_mihomo_proxy_names` 修复重名节点与 Mihomo 热切/批测查找失败；修复 Mihomo Shadowsocks `plugin-opts`（改输出 YAML 映射并规范 `obfs-local`）、YAML 多行控制字符转义、悬空 `dialer-proxy` 防护；修复 sing-box TUN 首入站端口顺延、端口范围规则 `"8000-9000"` 转 `"8000:9000"`、Mihomo 逗号分隔 `DST-PORT` 与 Xray 去空格端口列表、以及 `tcp_ping` IPv6 bracket 格式化。
+    - `parser/{extra_uris.rs, clash_yaml.rs}`：`socks5`/`https` URI 往返保留 TLS 参数、`anytls` 兼容 `user:pass` 与 `?password=`、`mieru` 支持 `port-range` 别名、Clash WireGuard YAML 支持 `peers` 数组回退及 `[u8; 3]` `reserved` 解析。
+  - **前端表单、状态同步与体验修复**：修复 `AddNodeModal.tsx` 手动添加缺少 `ProtocolConfig` `"kind"` 标签且仅传 SS 字段导致 9 种协议保存反序列化失败的 BUG；`Settings.tsx` / `Rules.tsx` 端口与逗号分隔 DNS 改为失焦/回车校验提交并清理 Toast 定时器；`Dashboard.tsx` 监听 `core://status` 重同步后台 Failover 后的 `activeNode` 与真实 `sysproxy` 状态；`Proxies.tsx` / `Subscriptions.tsx` / `Logs.tsx` / `Connections.tsx` / `QrCodeModal.tsx` 修复超时红色 `Timeout` 标记、`Logs` 切换 `mihomo`/`xray` 误发 `sing-box` JSON、`seq` 去重、批量/订阅删除清理 `activeNode`、虚拟网格滚动归零与中英双语键 100% 同步。
+  - **全量回归与新增用例验证**：Rust 新增 6 项针对性回归测试后全部 **79 / 79** 通过（48 单元 + 7 内核校验 + 13 解析器 + 5 稳定性 + 5 系统集成 + 1 E2E），前端 **10 / 10** Vitest + ESLint + `tsc` + Vite 0 警告，真实 `novaproxy.exe` 构建启动存活 >4s 并向 `"Tauri Window" ("NovaProxy")` 发送 `WM_CLOSE` 正常退出（exit 0、`instance_ipc.json` 清除、WinINet 基线无损）。
+
+### 阶段 P9：四平台全兼容（Windows / macOS / Linux / Android）与全链路日志遥测诊断系统 - 【已完成】
+- **2026-11-17 P9 跨平台架构与诊断日志升级**：
+  - **四平台系统集成层（`src-tauri/src/system/*`, `core/{process, updater, manager}.rs`, `model/node.rs`, `parser/qrcode.rs`）**：
+    - `system/sysproxy.rs` 新增 macOS `networksetup`、Linux `gsettings`/`kwriteconfig` 及 Android 安全空操作实现，保留 Windows WinINet 基线快照与退出恢复。
+    - `system/autostart.rs` / `elevation.rs` / `service.rs` / `tun.rs` / `network.rs` / `deeplink.rs` 实现 Windows/macOS/Linux/Android 适配（macOS LaunchAgent / `osascript` / `launchctl` / `utun` / `RunEvent::Opened` + `Info.plist`；Linux XDG `.desktop` / `xdg-mime` / `CAP_NET_ADMIN` / `systemctl` / `/dev/net/tun` / `flock` IPC；Android 沙箱适配与出站接口监控）。
+    - `core/process.rs` 新增 Unix `setpgid(0, 0)` + Linux/Android `PR_SET_PDEATHSIG(SIGKILL)` + 进程组 `JobObject` 同生共死，升级 `updater.rs` 支持 `.zip`/`.tar.gz`/`.gz` 多平台内核更新包，升级 `reqwest` 为纯 Rust `rustls-tls` 消除 Android/Linux OpenSSL 交叉编译阻塞。
+    - `build.rs` 与 `.cargo/config.toml` 移除全局 Windows 目标锁定，Windows MinGW-w64 增加 `-specs` 禁用不兼容 GCC 16 `default-manifest.o` 并配合 `--exclude-all-symbols` 解决 `cdylib` 导出符号超限与测试可执行文件 `TaskDialogIndirect` 问题。
+  - **Android 原生 VPN 与三内核全量打包（`src-tauri/plugins/tauri-plugin-android-vpn`）**：
+    - 实现 Tauri 2 Mobile 原生插件 `AndroidVpnPlugin.kt` + `NovaProxyVpnService.kt` + `hev-socks5-tunnel` v2.20.0（提取自 `hev-socks5-tunnel.aar` 为 `libs/hev-socks5-tunnel.jar` 与全 ABI `libhev-socks5-tunnel.so`），通过 `VpnService.Builder` + `addDisallowedApplication(packageName)` 防回环并将 `tunFd` 转发至本地 core 混合端口；自动从 `nativeLibraryDir` 加载打包为 `libsingbox.so` / `libmihomo.so` / `libxray.so` 的三内核二进制（符合 Android 10+ W^X 执行规范）。
+    - 新增 `tauri.android.conf.json`、`scripts/configure-android.mjs`、`scripts/build-android.ps1`、`scripts/fetch-cores.sh` 及跨平台增强 `scripts/fetch-cores.ps1`，本地完成 `aarch64-linux-android` & `x86_64-linux-android` 交叉编译与 `app-universal-debug.apk`（`294,905,078` 字节）实包组装与 `aapt2` 清单校验。
+  - **全链路持久化日志与性能遥测优化系统（`monitor/logs.rs`, `monitor/telemetry.rs`, `commands/mod.rs`, `src/pages/Logs.tsx`）**：
+    - `PersistentLogWriter` 将全部内核 stdout/stderr、Rust `tracing` 事件（`NovaTracingLayer`）与前端未捕获异常（`ErrorBoundary` / `window.onerror` / `unhandledrejection`）经 `sanitize_log_message` 凭据脱敏后同步写入 4 MiB 轮转文件 `novaproxy.log` 与结构化 `events.jsonl`。
+    - `TelemetryTracker` 采集内核启动阶段耗时（配置生成/端口检测/拉起）、故障转移次数、崩溃记录、网络变更与各协议延迟/超时率，自动生成中英双语 `OptimizationInsight` 建议。
+    - `export_diagnostic_bundle` 命令一键打包脱敏环境报告与全量磁盘日志文件为 `.zip`；前端新增 `PlatformInfo` 自适应桌面/移动端（底部导航栏、按端隐藏不适用桌面特性）、日志台实时/磁盘文件双视图、模块来源筛选及一键导出诊断包。
+  - **CI/CD 四端全量自动化**：升级 `.github/workflows/ci.yml`（前端 + Windows/Ubuntu/macOS 三桌面矩阵 + Android NDK/APK 检查）与 `.github/workflows/release.yml`（Windows NSIS/Portable + macOS arm64/x64 DMG + Linux deb/AppImage + Android 通用 APK + `SHA256SUMS.txt`）。
+
 ## 已知问题与遗留项
-- 在 PowerShell 会话中运行 Cargo 命令时，需确保将 WinLibs MinGW-w64 (`C:\Users\31752\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin`) 与 `$env:USERPROFILE\.cargo\bin` 加入 `$env:PATH`，且 `CARGO_TARGET_DIR` 保持 ASCII 路径（已在 `src-tauri/.cargo/config.toml` 中配置）。
+- `scripts/fetch-cores.ps1` 仍保留用于下载各平台官方核心二进制，Windows GNU 环境编译需保证 WinLibs MinGW-w64 与 Rust `.cargo/bin` 在 `PATH` 中，并通过 `$env:CARGO_TARGET_DIR` 指定 ASCII 构建目录以兼容非 ASCII 工作区路径。
+- 本机实际运行与实测覆盖 Windows x86_64（全部 83 项 Rust 测试、10 项 Vitest、`novaproxy.exe` 启动与日志落盘/退出清理）以及 Android NDK `arm64-v8a` + `x86_64`（交叉编译与 `app-universal-debug.apk` 打包）；macOS `.dmg` 与 Linux `.deb`/`.AppImage` 构建及运行依赖 GitHub Actions 对应 runner 或真实目标设备进一步集成验证。
+- Android 实机安装运行（真机/模拟器上的 `VpnService` 系统授权弹窗与隧道流量端到端转发）受限于当前无连接 Android 设备尚未真机运行调试，已通过 NDK 编译、APK 静态剖析（`aapt2`）与插件服务/JNI manifest 验证，可在真机/模拟器安装 `app-universal-debug.apk` 后进一步测试。

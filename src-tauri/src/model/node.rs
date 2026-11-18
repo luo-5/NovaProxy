@@ -27,17 +27,23 @@ impl CoreType {
         match self {
             #[cfg(target_os = "windows")]
             CoreType::SingBox => "sing-box.exe",
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "android")]
+            CoreType::SingBox => "libsingbox.so",
+            #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
             CoreType::SingBox => "sing-box",
 
             #[cfg(target_os = "windows")]
             CoreType::Mihomo => "mihomo.exe",
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "android")]
+            CoreType::Mihomo => "libmihomo.so",
+            #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
             CoreType::Mihomo => "mihomo",
 
             #[cfg(target_os = "windows")]
             CoreType::Xray => "xray.exe",
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "android")]
+            CoreType::Xray => "libxray.so",
+            #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
             CoreType::Xray => "xray",
         }
     }
@@ -586,7 +592,7 @@ impl ProxyNode {
             .unwrap_or(TransportKind::Tcp)
     }
 
-    /// Computes a deterministic SHA-256 fingerprint from server + port + protocol + transport + key credentials
+    /// Computes a deterministic SHA-256 fingerprint from server + port + protocol + transport + TLS + key credentials
     pub fn compute_fingerprint(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.server.trim().to_ascii_lowercase().as_bytes());
@@ -598,6 +604,119 @@ impl ProxyNode {
         hasher.update(format!("{:?}", self.transport_kind()).as_bytes());
         hasher.update(b":");
         hasher.update(self.settings.credential_key().as_bytes());
+
+        if let ProtocolConfig::Hysteria2(hy2) = &self.settings {
+            if let Some(ports) = &hy2.ports {
+                hasher.update(b":ports=");
+                hasher.update(ports.trim().as_bytes());
+            }
+        }
+
+        if let Some(tr) = &self.transport {
+            match tr {
+                TransportConfig::Ws { path, host, .. } => {
+                    hasher.update(b":ws=");
+                    hasher.update(path.trim().as_bytes());
+                    if let Some(h) = host {
+                        hasher.update(b"@");
+                        hasher.update(h.trim().to_ascii_lowercase().as_bytes());
+                    }
+                }
+                TransportConfig::Grpc {
+                    service_name,
+                    authority,
+                    ..
+                } => {
+                    hasher.update(b":grpc=");
+                    hasher.update(service_name.trim().as_bytes());
+                    if let Some(a) = authority {
+                        hasher.update(b"@");
+                        hasher.update(a.trim().to_ascii_lowercase().as_bytes());
+                    }
+                }
+                TransportConfig::Http { host, path, .. } => {
+                    hasher.update(b":http=");
+                    hasher.update(path.trim().as_bytes());
+                    for h in host {
+                        hasher.update(b"@");
+                        hasher.update(h.trim().to_ascii_lowercase().as_bytes());
+                    }
+                }
+                TransportConfig::HttpUpgrade { host, path, .. } => {
+                    hasher.update(b":hu=");
+                    hasher.update(path.trim().as_bytes());
+                    if let Some(h) = host {
+                        hasher.update(b"@");
+                        hasher.update(h.trim().to_ascii_lowercase().as_bytes());
+                    }
+                }
+                TransportConfig::Xhttp {
+                    host, path, mode, ..
+                } => {
+                    hasher.update(b":xh=");
+                    hasher.update(path.trim().as_bytes());
+                    if let Some(h) = host {
+                        hasher.update(b"@");
+                        hasher.update(h.trim().to_ascii_lowercase().as_bytes());
+                    }
+                    if let Some(m) = mode {
+                        hasher.update(b"#");
+                        hasher.update(m.trim().as_bytes());
+                    }
+                }
+                TransportConfig::Tcp {
+                    header_type,
+                    http_path,
+                    ..
+                } => {
+                    if let Some(ht) = header_type {
+                        hasher.update(b":tcp=");
+                        hasher.update(ht.trim().as_bytes());
+                    }
+                    if let Some(p) = http_path {
+                        hasher.update(b":path=");
+                        hasher.update(p.trim().as_bytes());
+                    }
+                }
+                TransportConfig::Mkcp {
+                    seed, header_type, ..
+                } => {
+                    if let Some(s) = seed {
+                        hasher.update(b":seed=");
+                        hasher.update(s.trim().as_bytes());
+                    }
+                    if let Some(ht) = header_type {
+                        hasher.update(b":ht=");
+                        hasher.update(ht.trim().as_bytes());
+                    }
+                }
+                TransportConfig::Quic { security, key, .. } => {
+                    if let Some(sec) = security {
+                        hasher.update(b":qsec=");
+                        hasher.update(sec.trim().as_bytes());
+                    }
+                    if let Some(k) = key {
+                        hasher.update(b":qkey=");
+                        hasher.update(k.trim().as_bytes());
+                    }
+                }
+            }
+        }
+
+        if let Some(tls) = &self.tls {
+            if tls.enabled {
+                hasher.update(b":tls");
+                if let Some(sni) = &tls.server_name {
+                    hasher.update(b":sni=");
+                    hasher.update(sni.trim().to_ascii_lowercase().as_bytes());
+                }
+                if let Some(reality) = &tls.reality {
+                    hasher.update(b":pbk=");
+                    hasher.update(reality.public_key.trim().as_bytes());
+                }
+            }
+        }
+
         hex::encode(hasher.finalize())
     }
 }

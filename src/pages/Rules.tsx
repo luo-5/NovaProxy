@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Plus,
   ArrowUp,
   ArrowDown,
+  GripVertical,
   Trash2,
   Database,
   Sliders,
@@ -22,6 +23,7 @@ import {
   type DnsSettings,
   type DnsStrategy,
 } from "../lib/ipc";
+import { reorderItemsById, reorderItemsByIndex } from "../lib/listHelpers";
 import { AddRuleModal } from "../components/AddRuleModal";
 
 export const Rules: React.FC = () => {
@@ -33,6 +35,11 @@ export const Rules: React.FC = () => {
   const [activeTab, setActiveTab] = useState<"routing" | "dns">("routing");
   const [isAddOpen, setIsAddOpen] = useState<boolean>(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [domesticDnsInput, setDomesticDnsInput] = useState<string>("");
+  const [remoteDnsInput, setRemoteDnsInput] = useState<string>("");
+  const toastTimerRef = useRef<number | null>(null);
 
   const fetchAll = async () => {
     try {
@@ -43,6 +50,8 @@ export const Rules: React.FC = () => {
       ]);
       setRoutingSettings(rSettings);
       setDnsSettings(dSettings);
+      setDomesticDnsInput(dSettings.domestic_dns.join(", "));
+      setRemoteDnsInput(dSettings.remote_dns.join(", "));
       setRules(rRules);
     } catch {
       // ignore
@@ -51,11 +60,22 @@ export const Rules: React.FC = () => {
 
   useEffect(() => {
     fetchAll();
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
   }, []);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 2500);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMsg(null);
+      toastTimerRef.current = null;
+    }, 2500);
   };
 
   // Toggle built-in rules
@@ -65,29 +85,41 @@ export const Rules: React.FC = () => {
     try {
       const saved = await saveRoutingSettings(updated);
       setRoutingSettings(saved);
-      showToast("Routing settings saved");
+      showToast(t("rules.routingSaved"));
     } catch (err) {
       showToast(String(err));
     }
   };
 
-  // Move rule up or down
+  // Persist reordered rules with optimistic update & rollback on failure
+  const persistRuleOrder = async (nextRules: RuleItem[], previousRules: RuleItem[]) => {
+    setRules(nextRules);
+    try {
+      await reorderRoutingRules(nextRules.map((r) => r.id));
+    } catch (err) {
+      setRules(previousRules);
+      showToast(String(err));
+    }
+  };
+
+  // Move rule up or down (keyboard / button accessible fallback)
   const handleMoveRule = async (index: number, direction: "up" | "down") => {
     const targetIdx = direction === "up" ? index - 1 : index + 1;
     if (targetIdx < 0 || targetIdx >= rules.length) return;
+    const previous = rules;
+    const next = reorderItemsByIndex(rules, index, targetIdx);
+    await persistRuleOrder(next, previous);
+  };
 
-    const newRules = [...rules];
-    const temp = newRules[index];
-    newRules[index] = newRules[targetIdx];
-    newRules[targetIdx] = temp;
-
-    setRules(newRules);
-    try {
-      await reorderRoutingRules(newRules.map((r) => r.id));
-    } catch (err) {
-      showToast(String(err));
-      fetchAll();
-    }
+  // Drag-and-drop drop handler
+  const handleDropOnRule = async (targetId: string) => {
+    const sourceId = draggingId;
+    setDraggingId(null);
+    setDragOverId(null);
+    if (!sourceId || sourceId === targetId) return;
+    const previous = rules;
+    const next = reorderItemsById(rules, sourceId, targetId);
+    await persistRuleOrder(next, previous);
   };
 
   // Delete rule
@@ -95,7 +127,7 @@ export const Rules: React.FC = () => {
     try {
       await deleteRoutingRule(id);
       setRules((prev) => prev.filter((r) => r.id !== id));
-      showToast("Rule deleted");
+      showToast(t("rules.ruleDeleted"));
     } catch (err) {
       showToast(String(err));
     }
@@ -108,14 +140,39 @@ export const Rules: React.FC = () => {
     try {
       const saved = await saveDnsSettings(updated);
       setDnsSettings(saved);
-      showToast("DNS settings saved");
+      setDomesticDnsInput(saved.domestic_dns.join(", "));
+      setRemoteDnsInput(saved.remote_dns.join(", "));
+      showToast(t("rules.dnsSaved"));
     } catch (err) {
       showToast(String(err));
     }
   };
 
+  const commitDnsField = (field: "domestic_dns" | "remote_dns") => {
+    if (!dnsSettings) return;
+    const raw = field === "domestic_dns" ? domesticDnsInput : remoteDnsInput;
+    const list = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (list.length === 0) {
+      showToast(t("rules.dnsRequiredError"));
+      setDomesticDnsInput(dnsSettings.domestic_dns.join(", "));
+      setRemoteDnsInput(dnsSettings.remote_dns.join(", "));
+      return;
+    }
+    const prevList = dnsSettings[field];
+    if (
+      prevList.length === list.length &&
+      prevList.every((v, idx) => v === list[idx])
+    ) {
+      return;
+    }
+    void handleSaveDns({ [field]: list } as Partial<DnsSettings>);
+  };
+
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-6">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6">
       {/* Toast Notification */}
       {toastMsg && (
         <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-card border border-border text-foreground shadow-2xl text-xs font-medium animate-in fade-in slide-in-from-bottom-2">
@@ -139,7 +196,7 @@ export const Rules: React.FC = () => {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            Split Routing
+            {t("rules.tabRouting")}
           </button>
           <button
             onClick={() => setActiveTab("dns")}
@@ -149,7 +206,7 @@ export const Rules: React.FC = () => {
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            DNS & Anti-Leak
+            {t("rules.tabDns")} & Anti-Leak
           </button>
         </div>
       </div>
@@ -176,10 +233,10 @@ export const Rules: React.FC = () => {
                 >
                   <div className="space-y-1">
                     <span className="text-xs font-semibold block text-foreground">
-                      Bypass Private IPs
+                      {t("rules.privateIpBypass")}
                     </span>
                     <span className="text-[11px] text-muted-foreground block">
-                      Direct LAN, 127.0.0.1, 10.0.0.0/8, 192.168.0.0/16
+                      {t("rules.privateIpDesc")}
                     </span>
                   </div>
                   <div
@@ -204,10 +261,10 @@ export const Rules: React.FC = () => {
                 >
                   <div className="space-y-1">
                     <span className="text-xs font-semibold block text-foreground">
-                      Direct Mainland (CN)
+                      {t("rules.mainlandDirect")}
                     </span>
                     <span className="text-[11px] text-muted-foreground block">
-                      Direct GeoSite:cn domains and GeoIP:cn CIDRs
+                      {t("rules.mainlandDirectDesc")}
                     </span>
                   </div>
                   <div
@@ -232,10 +289,10 @@ export const Rules: React.FC = () => {
                 >
                   <div className="space-y-1">
                     <span className="text-xs font-semibold block text-foreground">
-                      Block Ads & Tracking
+                      {t("rules.adBlock")}
                     </span>
                     <span className="text-[11px] text-muted-foreground block">
-                      Drop known trackers and malicious telemetry
+                      {t("rules.adBlockDesc")}
                     </span>
                   </div>
                   <div
@@ -257,7 +314,7 @@ export const Rules: React.FC = () => {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-semibold text-sm">{t("rules.customRules")}</h3>
-                <p className="text-xs text-muted-foreground">Rules evaluate in top-down sequential order</p>
+                <p className="text-xs text-muted-foreground">{t("rules.customRulesHint")}</p>
               </div>
 
               <button
@@ -271,7 +328,7 @@ export const Rules: React.FC = () => {
 
             {rules.length === 0 ? (
               <div className="p-8 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl">
-                No custom rules defined. Click "Add Rule" to insert custom routing.
+                {t("rules.noCustomRules")}
               </div>
             ) : (
               <div className="space-y-2">
@@ -284,14 +341,53 @@ export const Rules: React.FC = () => {
                       ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
                       : "bg-rose-500/10 text-rose-400 border-rose-500/20";
 
+                  const isDragging = draggingId === rule.id;
+                  const isDragOver = dragOverId === rule.id && draggingId !== rule.id;
+
                   return (
                     <div
                       key={rule.id}
-                      className="p-3 bg-secondary/30 border border-border/60 rounded-xl flex items-center justify-between gap-4 text-xs group hover:border-primary/40 transition-colors"
+                      draggable
+                      onDragStart={(e) => {
+                        setDraggingId(rule.id);
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", rule.id);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (dragOverId !== rule.id) {
+                          setDragOverId(rule.id);
+                        }
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverId === rule.id) setDragOverId(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        handleDropOnRule(rule.id);
+                      }}
+                      onDragEnd={() => {
+                        setDraggingId(null);
+                        setDragOverId(null);
+                      }}
+                      className={`p-3 bg-secondary/30 border rounded-xl flex items-center justify-between gap-4 text-xs group transition-all ${
+                        isDragging
+                          ? "opacity-50 border-primary/50"
+                          : isDragOver
+                          ? "border-primary ring-2 ring-primary/30 bg-primary/5"
+                          : "border-border/60 hover:border-primary/40"
+                      }`}
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        {/* Order indicator & move buttons */}
+                        {/* Drag handle & accessible up/down buttons */}
                         <div className="flex items-center gap-1 text-muted-foreground">
+                          <span
+                            title={t("rules.dragHint", { defaultValue: "拖拽调整优先级顺序" })}
+                            className="cursor-grab active:cursor-grabbing p-1 hover:text-foreground"
+                          >
+                            <GripVertical className="w-3.5 h-3.5" />
+                          </span>
                           <button
                             disabled={idx === 0}
                             onClick={() => handleMoveRule(idx, "up")}
@@ -374,15 +470,15 @@ export const Rules: React.FC = () => {
                 </label>
                 <input
                   type="text"
-                  value={dnsSettings.domestic_dns.join(", ")}
-                  onChange={(e) =>
-                    handleSaveDns({
-                      domestic_dns: e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })
-                  }
+                  value={domesticDnsInput}
+                  onChange={(e) => setDomesticDnsInput(e.target.value)}
+                  onBlur={() => commitDnsField("domestic_dns")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  placeholder="223.5.5.5, 119.29.29.29"
                   className="w-full px-3 py-2 rounded-xl bg-secondary/50 border border-border text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
@@ -393,15 +489,15 @@ export const Rules: React.FC = () => {
                 </label>
                 <input
                   type="text"
-                  value={dnsSettings.remote_dns.join(", ")}
-                  onChange={(e) =>
-                    handleSaveDns({
-                      remote_dns: e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })
-                  }
+                  value={remoteDnsInput}
+                  onChange={(e) => setRemoteDnsInput(e.target.value)}
+                  onBlur={() => commitDnsField("remote_dns")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  placeholder="https://1.1.1.1/dns-query, https://dns.google/dns-query"
                   className="w-full px-3 py-2 rounded-xl bg-secondary/50 border border-border text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>

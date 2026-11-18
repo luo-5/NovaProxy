@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Activity,
@@ -27,6 +27,15 @@ export const Connections: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedNetwork, setSelectedNetwork] = useState<string>("all");
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isConnected) {
@@ -51,16 +60,22 @@ export const Connections: React.FC = () => {
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 2500);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMsg(null);
+      toastTimerRef.current = null;
+    }, 2500);
   };
 
   const handleCloseOne = async (id: string) => {
     try {
       await closeCoreConnection(id);
       setConnections((prev) => prev.filter((c) => c.id !== id));
-      showToast("Connection closed");
-    } catch {
-      // ignore
+      showToast(t("connections.connectionClosed"));
+    } catch (err) {
+      showToast(String(err));
     }
   };
 
@@ -68,9 +83,9 @@ export const Connections: React.FC = () => {
     try {
       await closeCoreConnection();
       setConnections([]);
-      showToast("All connections closed");
-    } catch {
-      // ignore
+      showToast(t("connections.allConnectionsClosed"));
+    } catch (err) {
+      showToast(String(err));
     }
   };
 
@@ -95,7 +110,7 @@ export const Connections: React.FC = () => {
   }, [connections, selectedNetwork, searchQuery]);
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-6">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6">
       {/* Toast Notification */}
       {toastMsg && (
         <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-card border border-border text-foreground shadow-2xl text-xs font-medium animate-in fade-in slide-in-from-bottom-2">

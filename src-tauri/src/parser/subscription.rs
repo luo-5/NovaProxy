@@ -1,6 +1,6 @@
-use crate::model::{ProxyNode, Subscription};
+use crate::model::{NodeGroup, ProxyNode, Subscription};
 use crate::parser::base64::{decode_base64_to_string, strip_bom_and_trim};
-use crate::parser::clash_yaml::parse_clash_yaml;
+use crate::parser::clash_yaml::parse_clash_yaml_with_groups;
 use crate::parser::error::{ParseError, ParseResult};
 use crate::parser::parse_share_link;
 use crate::parser::singbox_json::parse_json_subscription;
@@ -8,7 +8,7 @@ use crate::parser::wireguard::parse_wg_conf;
 use chrono::Utc;
 use reqwest::header::USER_AGENT;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use ts_rs::TS;
 
@@ -28,6 +28,8 @@ pub enum SubscriptionFormat {
 pub struct SubscriptionParseReport {
     pub format: SubscriptionFormat,
     pub nodes: Vec<ProxyNode>,
+    #[serde(default)]
+    pub groups: Vec<NodeGroup>,
     pub warnings: Vec<String>,
 }
 
@@ -171,6 +173,7 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
         return Ok(SubscriptionParseReport {
             format: SubscriptionFormat::SingBoxOrSip008Json,
             nodes: deduplicate_nodes(nodes),
+            groups: Vec::new(),
             warnings,
         });
     }
@@ -181,18 +184,15 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
         return Ok(SubscriptionParseReport {
             format: SubscriptionFormat::WireGuardConf,
             nodes: vec![node],
+            groups: Vec::new(),
             warnings: Vec::new(),
         });
     }
 
     // 3. Clash / Mihomo YAML
     if looks_like_clash_yaml(cleaned) {
-        let (nodes, warnings) = parse_clash_yaml(cleaned)?;
-        return Ok(SubscriptionParseReport {
-            format: SubscriptionFormat::ClashYaml,
-            nodes: deduplicate_nodes(nodes),
-            warnings,
-        });
+        let (nodes, groups, warnings) = parse_clash_yaml_with_groups(cleaned)?;
+        return Ok(build_clash_yaml_report(nodes, groups, warnings));
     }
 
     // 4. Plain-text share links (if at least one line starts with a known URI scheme)
@@ -204,6 +204,7 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
         return Ok(SubscriptionParseReport {
             format: SubscriptionFormat::PlainLinks,
             nodes: deduplicate_nodes(nodes),
+            groups: Vec::new(),
             warnings,
         });
     }
@@ -216,17 +217,14 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
                 return Ok(SubscriptionParseReport {
                     format: SubscriptionFormat::SingBoxOrSip008Json,
                     nodes: deduplicate_nodes(nodes),
+                    groups: Vec::new(),
                     warnings,
                 });
             }
         }
         if looks_like_clash_yaml(decoded_clean) {
-            if let Ok((nodes, warnings)) = parse_clash_yaml(decoded_clean) {
-                return Ok(SubscriptionParseReport {
-                    format: SubscriptionFormat::ClashYaml,
-                    nodes: deduplicate_nodes(nodes),
-                    warnings,
-                });
+            if let Ok((nodes, groups, warnings)) = parse_clash_yaml_with_groups(decoded_clean) {
+                return Ok(build_clash_yaml_report(nodes, groups, warnings));
             }
         }
         if decoded_clean.contains("[Interface]") && decoded_clean.contains("[Peer]") {
@@ -234,6 +232,7 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
                 return Ok(SubscriptionParseReport {
                     format: SubscriptionFormat::WireGuardConf,
                     nodes: vec![node],
+                    groups: Vec::new(),
                     warnings: Vec::new(),
                 });
             }
@@ -243,6 +242,7 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
             return Ok(SubscriptionParseReport {
                 format: SubscriptionFormat::Base64Links,
                 nodes: deduplicate_nodes(nodes),
+                groups: Vec::new(),
                 warnings,
             });
         }
@@ -254,18 +254,72 @@ pub fn parse_subscription_content(raw_input: &str) -> ParseResult<SubscriptionPa
 }
 
 /// Deduplicates nodes by their deterministic SHA-256 fingerprint (`compute_fingerprint()`),
-/// preserving the first occurrence's order.
-pub fn deduplicate_nodes(nodes: Vec<ProxyNode>) -> Vec<ProxyNode> {
-    let mut seen = HashSet::new();
+fn deduplicate_nodes_with_id_map(
+    nodes: Vec<ProxyNode>,
+) -> (Vec<ProxyNode>, HashMap<String, String>) {
+    let mut fp_to_kept_id: HashMap<String, String> = HashMap::new();
+    let mut orig_to_kept_id: HashMap<String, String> = HashMap::with_capacity(nodes.len());
     let mut unique = Vec::with_capacity(nodes.len());
+
     for mut node in nodes {
         let fp = node.compute_fingerprint();
-        if seen.insert(fp) {
+        if let Some(kept_id) = fp_to_kept_id.get(&fp) {
+            orig_to_kept_id.insert(node.id.clone(), kept_id.clone());
+        } else {
+            let kept_id = node.id.clone();
+            fp_to_kept_id.insert(fp, kept_id.clone());
+            orig_to_kept_id.insert(kept_id.clone(), kept_id);
             node.sort_order = unique.len() as i32;
             unique.push(node);
         }
     }
-    unique
+
+    (unique, orig_to_kept_id)
+}
+
+fn remap_groups_after_dedup(
+    groups: Vec<NodeGroup>,
+    id_map: &HashMap<String, String>,
+) -> Vec<NodeGroup> {
+    let mut out = Vec::with_capacity(groups.len());
+    for mut g in groups {
+        let mut seen = HashSet::new();
+        let mut mapped = Vec::with_capacity(g.node_ids.len());
+        for orig_id in g.node_ids {
+            if let Some(kept_id) = id_map.get(&orig_id) {
+                if seen.insert(kept_id.clone()) {
+                    mapped.push(kept_id.clone());
+                }
+            }
+        }
+        if !mapped.is_empty() {
+            g.node_ids = mapped;
+            g.sort_order = out.len() as i32;
+            out.push(g);
+        }
+    }
+    out
+}
+
+fn build_clash_yaml_report(
+    nodes: Vec<ProxyNode>,
+    groups: Vec<NodeGroup>,
+    warnings: Vec<String>,
+) -> SubscriptionParseReport {
+    let (deduped_nodes, id_map) = deduplicate_nodes_with_id_map(nodes);
+    let mapped_groups = remap_groups_after_dedup(groups, &id_map);
+    SubscriptionParseReport {
+        format: SubscriptionFormat::ClashYaml,
+        nodes: deduped_nodes,
+        groups: mapped_groups,
+        warnings,
+    }
+}
+
+/// Deduplicates nodes based on `compute_fingerprint()`, keeping the first occurrence and
+/// preserving the first occurrence's order.
+pub fn deduplicate_nodes(nodes: Vec<ProxyNode>) -> Vec<ProxyNode> {
+    deduplicate_nodes_with_id_map(nodes).0
 }
 
 /// Incrementally merges newly parsed subscription nodes with the subscription's existing nodes:
@@ -336,7 +390,10 @@ pub async fn fetch_and_parse_subscription(
         .user_agent
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or("clash.meta/v1.19.33 NovaProxy/0.1.0");
+        .unwrap_or(concat!(
+            "clash.meta/v1.19.33 NovaProxy/",
+            env!("CARGO_PKG_VERSION")
+        ));
 
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs.max(3)))

@@ -62,17 +62,35 @@ export type RoutingMode = "rule" | "global" | "direct";
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
-export type AppSettings = { mixed_port: number, socks_port: number | null, http_port: number | null, clash_api_port: number, clash_api_secret: string | null, allow_lan: boolean, ipv6: boolean, log_level: LogLevel, routing_mode: RoutingMode, preferred_core: CoreType | null, tun_mode: boolean, system_proxy: boolean, active_node_id: string | null, auto_port_fallback: boolean, language: string, theme: string, };
+export type AppSettings = { mixed_port: number, socks_port: number | null, http_port: number | null, clash_api_port: number, clash_api_secret: string | null, allow_lan: boolean, ipv6: boolean, log_level: LogLevel, routing_mode: RoutingMode, preferred_core: CoreType | null, tun_mode: boolean, system_proxy: boolean, active_node_id: string | null, auto_port_fallback: boolean, register_clash_scheme: boolean, language: string, theme: string, };
 
-export type LogStream = "stdout" | "stderr" | "system";
+export type LogStream = "stdout" | "stderr" | "system" | "app" | "frontend";
 
-export type CoreLogEntry = { seq: number, timestamp: number, core: CoreType | null, stream: LogStream, level: LogLevel, message: string, };
+export type CoreLogEntry = { seq: number, timestamp: number, core: CoreType | null, stream: LogStream, level: LogLevel, source: string | null, duration_ms: number | null, message: string, };
+
+export type LogFileInfo = { name: string, size_bytes: number, modified_at: number, };
+
+export type DiagnosticBundleResult = { path: string, filename: string, size_bytes: number, };
+
+export type CoreStartSample = { timestamp: number, core: CoreType, upstream_core: CoreType | null, config_gen_ms: number, port_resolve_ms: number, spawn_ms: number, total_ms: number, port_reassigned: boolean, success: boolean, error: string | null, };
+
+export type ProtocolLatencyStats = { protocol: string, total: number, successes: number, timeouts: number, avg_ms: number, max_ms: number, last_error: string | null, };
+
+export type FrontendErrorSample = { timestamp: number, level: LogLevel, component: string, message: string, };
+
+export type CrashSample = { timestamp: number, core: CoreType, exit_code: number | null, reason: string, };
+
+export type InsightSeverity = "info" | "warn" | "critical";
+
+export type OptimizationInsight = { code: string, severity: InsightSeverity, title_zh: string, title_en: string, metric: string, suggestion_zh: string, suggestion_en: string, };
+
+export type TelemetrySummary = { os: string, arch: string, log_dir: string, total_log_bytes: number, total_core_starts: number, avg_core_start_ms: number, max_core_start_ms: number, port_reassigned_count: number, failover_count: number, crash_count: number, network_change_count: number, subscription_refresh_count: number, subscription_fail_count: number, recent_starts: Array<CoreStartSample>, latency_by_protocol: Array<ProtocolLatencyStats>, recent_crashes: Array<CrashSample>, recent_frontend_errors: Array<FrontendErrorSample>, insights: Array<OptimizationInsight>, };
 
 export type CoreLifecycleState = { "state": "stopped" } | { "state": "starting" } | { "state": "running" } | { "state": "stopping" } | { "state": "crashed", exit_code: number | null, reason: string, };
 
-export type CoreStatusInfo = { lifecycle: CoreLifecycleState, active_core: CoreType | null, pid: number | null, started_at: number | null, requested_port: number | null, actual_mixed_port: number | null, port_reassigned: boolean, config_path: string | null, };
+export type CoreStatusInfo = { lifecycle: CoreLifecycleState, active_core: CoreType | null, pid: number | null, started_at: number | null, requested_port: number | null, actual_mixed_port: number | null, port_reassigned: boolean, config_path: string | null, upstream_core: CoreType | null, upstream_pid: number | null, relay_port: number | null, actual_clash_api_port: number | null, };
 
-export type CoreStartRequest = { core_type: CoreType | null, config_json: string | null, mixed_port: number | null, allow_lan: boolean | null, auto_port_fallback: boolean | null, };
+export type CoreStartRequest = { core_type: CoreType | null, config_json: string | null, mixed_port: number | null, allow_lan: boolean | null, auto_port_fallback: boolean | null, upstream_core_type: CoreType | null, upstream_config_json: string | null, relay_port: number | null, };
 
 export type CapabilityRule = { id: string, protocol: ProtocolType, transports: Array<TransportKind>, default_core: CoreType, supported_cores: Array<CoreType>, notes: string | null, };
 
@@ -84,13 +102,19 @@ export type CoreSelection = { core: CoreType, reason: SelectionReason, matched_r
 
 export type CoreLockEntry = { version: string, sha256: string, url: string, };
 
+export type CoreBinaryStatus = { core: CoreType, installed: boolean, installed_version: string | null, lock_version: string | null, sha256: string | null, };
+
 export type CoreUpdateCheckResult = { core: CoreType, current_version: string | null, latest_version: string, has_update: boolean, download_url: string, asset_name: string, };
 
 export type CoreUpdateResult = { core: CoreType, previous_version: string | null, new_version: string, sha256: string, };
 
+export type LatencyTestMode = "tcp" | "url";
+
+export type TrafficSnapshot = { up: number, down: number, };
+
 export type SubscriptionFormat = "plain_links" | "base64_links" | "clash_yaml" | "sing_box_or_sip008_json" | "wire_guard_conf";
 
-export type SubscriptionParseReport = { format: SubscriptionFormat, nodes: Array<ProxyNode>, warnings: Array<string>, };
+export type SubscriptionParseReport = { format: SubscriptionFormat, nodes: Array<ProxyNode>, groups: Array<NodeGroup>, warnings: Array<string>, };
 
 export type SubscriptionUserInfo = { upload: number | null, download: number | null, total: number | null, expire: number | null, update_interval_mins: number | null, home_url: string | null, };
 
@@ -106,7 +130,15 @@ export type DnsStrategy = "prefer_ipv4" | "prefer_ipv6" | "ipv4_only" | "ipv6_on
 
 export type DnsSettings = { enabled: boolean, fake_ip: boolean, fake_ip_range: string, domestic_dns: Array<string>, remote_dns: Array<string>, fallback_dns: Array<string>, strategy: DnsStrategy, disable_ipv6: boolean, };
 
+export type PlatformInfo = { os: string, arch: string, is_mobile: boolean, supports_system_proxy: boolean, supports_autostart: boolean, supports_tray: boolean, supports_screen_qr: boolean, supports_core_update: boolean, supports_tun: boolean, };
+
 export type SysProxySnapshot = { enabled: boolean, server: string | null, bypass: string | null, auto_config_url: string | null, };
+
+export type ServiceState = "not_installed" | "stopped" | "running" | "paused";
+
+export type WintunStatus = { elevated: boolean, wintun_present: boolean, wintun_path: string | null, service_state: ServiceState, ready: boolean, message: string, };
+
+export type UrlSchemeStatus = { novaproxy_registered: boolean, clash_registered_to_us: boolean, };
 
 export type TunSettings = { enabled: boolean, interface_name: string, address: string, auto_route: boolean, strict_route: boolean, stack: string, mtu: number, };
 

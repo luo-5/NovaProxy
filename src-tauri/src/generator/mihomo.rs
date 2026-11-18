@@ -1,11 +1,12 @@
 //! Mihomo (Clash.Meta) YAML configuration generator
 
-use crate::generator::dns::generate_mihomo_dns_yaml;
-use crate::generator::routing::generate_mihomo_rules_yaml;
+use crate::generator::dns::generate_mihomo_dns_yaml_for_routing;
+use crate::generator::routing::generate_mihomo_rules_yaml_with_options;
 use crate::model::node::{ProtocolConfig, ProxyNode, RealityConfig, TlsConfig, TransportConfig};
 use crate::model::routing::{DnsSettings, RoutingSettings};
-use crate::model::settings::AppSettings;
+use crate::model::settings::{AppSettings, RoutingMode};
 use crate::model::subscription::{GroupType, NodeGroup};
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,6 +15,35 @@ pub enum MihomoGeneratorError {
     InvalidNodeConfig(String, String),
     #[error("YAML formatting error: {0}")]
     Format(String),
+}
+
+/// Computes the exact deduplicated Mihomo YAML proxy name mapping (`node.id -> yaml_name`)
+/// used during config generation so Clash API hot-switching and latency queries stay in sync.
+pub fn resolve_mihomo_proxy_names(nodes: &[ProxyNode]) -> HashMap<String, String> {
+    let mut used_names: HashSet<String> =
+        ["PROXY", "AUTO", "FALLBACK", "DIRECT", "REJECT", "GLOBAL"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    let mut id_to_name: HashMap<String, String> = HashMap::with_capacity(nodes.len());
+
+    for node in nodes {
+        let base = node.name.trim();
+        let base_str = if base.is_empty() {
+            format!("{}:{}", node.server, node.port)
+        } else {
+            base.to_string()
+        };
+        let mut unique = base_str.clone();
+        let mut suffix = 2u32;
+        while !used_names.insert(unique.clone()) {
+            unique = format!("{base_str} ({suffix})");
+            suffix += 1;
+        }
+        id_to_name.insert(node.id.clone(), unique);
+    }
+
+    id_to_name
 }
 
 pub fn generate_mihomo_config(
@@ -56,19 +86,57 @@ pub fn generate_mihomo_config(
         out.push_str("  device: NovaProxy-TUN\n");
         out.push_str("  auto-route: true\n");
         out.push_str("  auto-detect-interface: true\n");
+        out.push_str("  dns-hijack:\n");
+        out.push_str("    - any:53\n");
+        out.push_str("    - tcp://any:53\n");
     }
 
     // 2. DNS section
-    out.push_str(&generate_mihomo_dns_yaml(dns));
+    out.push_str(&generate_mihomo_dns_yaml_for_routing(dns, routing));
 
-    // 3. Proxies section
+    // 3. Proxies section (ensure unique YAML proxy names)
     out.push_str("proxies:\n");
-    let mut valid_proxy_names = Vec::new();
+    let id_to_name = resolve_mihomo_proxy_names(nodes);
+    let candidate_names: Vec<String> = nodes
+        .iter()
+        .map(|n| {
+            id_to_name
+                .get(&n.id)
+                .cloned()
+                .unwrap_or_else(|| n.name.clone())
+        })
+        .collect();
+    let mut used_names: HashSet<String> =
+        ["PROXY", "AUTO", "FALLBACK", "DIRECT", "REJECT", "GLOBAL"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    used_names.extend(candidate_names.iter().cloned());
 
-    for node in nodes {
-        if let Some(yaml_block) = compile_mihomo_proxy_yaml(node) {
+    let mut valid_proxy_names = Vec::new();
+    let mut valid_id_to_name: HashMap<String, String> = HashMap::new();
+    let valid_supported_ids: HashSet<String> = nodes
+        .iter()
+        .filter(|n| !matches!(n.settings, ProtocolConfig::ShadowTls(_)))
+        .map(|n| n.id.clone())
+        .collect();
+
+    for (node, yaml_name) in nodes.iter().zip(candidate_names) {
+        let is_active = active_node_id == Some(node.id.as_str());
+        if let Some(yaml_block) =
+            compile_mihomo_proxy_yaml(node, &yaml_name, &id_to_name, &valid_supported_ids)
+        {
             out.push_str(&yaml_block);
-            valid_proxy_names.push(node.name.clone());
+            valid_proxy_names.push(yaml_name.clone());
+            valid_id_to_name.insert(node.id.clone(), yaml_name);
+        } else if is_active && routing.mode != RoutingMode::Direct {
+            return Err(MihomoGeneratorError::InvalidNodeConfig(
+                node.name.clone(),
+                format!(
+                    "protocol '{}' is not supported natively by mihomo",
+                    node.protocol
+                ),
+            ));
         }
     }
 
@@ -82,9 +150,23 @@ pub fn generate_mihomo_config(
     // 4. Proxy Groups section
     out.push_str("proxy-groups:\n");
 
-    let mut auto_candidates = valid_proxy_names.clone();
-    if auto_candidates.is_empty() {
-        auto_candidates.push("DIRECT".to_string());
+    let auto_candidates = valid_proxy_names.clone();
+
+    // Disambiguate user group names against built-in groups and proxy names
+    let mut group_used = used_names;
+    let mut resolved_groups: Vec<(&NodeGroup, String)> = Vec::with_capacity(groups.len());
+    for g in groups {
+        let mut g_name = g.name.trim().to_string();
+        if g_name.is_empty() {
+            g_name = g.id.clone();
+        }
+        let orig = g_name.clone();
+        let mut suffix = 2u32;
+        while !group_used.insert(g_name.clone()) {
+            g_name = format!("{orig} ({suffix})");
+            suffix += 1;
+        }
+        resolved_groups.push((g, g_name));
     }
 
     // Top-level PROXY group
@@ -92,17 +174,21 @@ pub fn generate_mihomo_config(
     out.push_str("    type: select\n");
     out.push_str("    proxies:\n");
 
-    if let Some(active_id) = active_node_id {
-        if let Some(active_node) = nodes.iter().find(|n| n.id == active_id) {
-            out.push_str(&format!("      - \"{}\"\n", escape_yaml(&active_node.name)));
-        }
+    let active_yaml_name = active_node_id
+        .and_then(|id| valid_id_to_name.get(id))
+        .cloned();
+    if let Some(ref active_name) = active_yaml_name {
+        out.push_str(&format!("      - \"{}\"\n", escape_yaml(active_name)));
     }
     out.push_str("      - AUTO\n");
     out.push_str("      - FALLBACK\n");
-    for g in groups {
-        out.push_str(&format!("      - \"{}\"\n", escape_yaml(&g.name)));
+    for (_, g_name) in &resolved_groups {
+        out.push_str(&format!("      - \"{}\"\n", escape_yaml(g_name)));
     }
     for name in &valid_proxy_names {
+        if active_yaml_name.as_deref() == Some(name.as_str()) {
+            continue;
+        }
         out.push_str(&format!("      - \"{}\"\n", escape_yaml(name)));
     }
     out.push_str("      - DIRECT\n");
@@ -128,14 +214,14 @@ pub fn generate_mihomo_config(
     }
 
     // Custom user groups
-    for g in groups {
+    for (g, g_name) in &resolved_groups {
         let g_type = match g.group_type {
             GroupType::Selector => "select",
             GroupType::UrlTest => "url-test",
             GroupType::Fallback => "fallback",
             GroupType::LoadBalance => "load-balance",
         };
-        out.push_str(&format!("  - name: \"{}\"\n", escape_yaml(&g.name)));
+        out.push_str(&format!("  - name: \"{}\"\n", escape_yaml(g_name)));
         out.push_str(&format!("    type: {}\n", g_type));
         if g.group_type != GroupType::Selector {
             out.push_str(&format!(
@@ -155,8 +241,10 @@ pub fn generate_mihomo_config(
         out.push_str("    proxies:\n");
         let mut members = Vec::new();
         for node_id in &g.node_ids {
-            if let Some(target) = nodes.iter().find(|n| &n.id == node_id) {
-                members.push(target.name.clone());
+            if let Some(target_name) = valid_id_to_name.get(node_id) {
+                if !members.contains(target_name) {
+                    members.push(target_name.clone());
+                }
             }
         }
         if members.is_empty() {
@@ -168,14 +256,23 @@ pub fn generate_mihomo_config(
     }
 
     // 5. Rules & Rule Providers
-    out.push_str(&generate_mihomo_rules_yaml(routing, "PROXY"));
+    out.push_str(&generate_mihomo_rules_yaml_with_options(
+        routing,
+        "PROXY",
+        settings.tun_mode,
+    ));
 
     Ok(out)
 }
 
-fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
+fn compile_mihomo_proxy_yaml(
+    node: &ProxyNode,
+    yaml_name: &str,
+    id_to_name: &HashMap<String, String>,
+    valid_supported_ids: &HashSet<String>,
+) -> Option<String> {
     let mut s = String::new();
-    s.push_str(&format!("  - name: \"{}\"\n", escape_yaml(&node.name)));
+    s.push_str(&format!("  - name: \"{}\"\n", escape_yaml(yaml_name)));
 
     match &node.settings {
         ProtocolConfig::Shadowsocks(ss) => {
@@ -189,9 +286,25 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
             ));
             s.push_str("    udp: true\n");
             if let Some(plugin) = &ss.plugin {
-                s.push_str(&format!("    plugin: {}\n", plugin));
-                if let Some(opts) = &ss.plugin_opts {
-                    s.push_str(&format!("    plugin-opts: {}\n", opts));
+                let mihomo_plugin = match plugin.trim() {
+                    "obfs-local" | "simple-obfs" => "obfs",
+                    other => other,
+                };
+                if !mihomo_plugin.is_empty() {
+                    s.push_str(&format!("    plugin: {}\n", mihomo_plugin));
+                    if let Some(opts) = &ss.plugin_opts {
+                        let parsed_opts = parse_ss_plugin_opts_map(mihomo_plugin, opts);
+                        if !parsed_opts.is_empty() {
+                            s.push_str("    plugin-opts:\n");
+                            for (k, v) in parsed_opts {
+                                if v == "true" || v == "false" {
+                                    s.push_str(&format!("      {k}: {v}\n"));
+                                } else {
+                                    s.push_str(&format!("      {k}: \"{}\"\n", escape_yaml(&v)));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -248,12 +361,7 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
                 escape_yaml(&tr.password)
             ));
             s.push_str("    udp: true\n");
-            let sni = node
-                .tls
-                .as_ref()
-                .and_then(|t| t.server_name.as_deref())
-                .unwrap_or(&node.server);
-            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, true);
             append_mihomo_transport_yaml(&mut s, node.transport.as_ref());
         }
         ProtocolConfig::Hysteria(hy) => {
@@ -263,19 +371,50 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
             if let Some(auth) = &hy.auth_str {
                 s.push_str(&format!("    auth-str: \"{}\"\n", escape_yaml(auth)));
             }
+            if let Some(proto) = &hy.protocol {
+                if !proto.is_empty() {
+                    s.push_str(&format!("    protocol: {}\n", proto));
+                }
+            }
             s.push_str(&format!("    up: \"{} Mbps\"\n", hy.up_mbps));
             s.push_str(&format!("    down: \"{} Mbps\"\n", hy.down_mbps));
-            let sni = node
-                .tls
-                .as_ref()
-                .and_then(|t| t.server_name.as_deref())
-                .unwrap_or(&node.server);
-            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
+            if let Some(obfs) = &hy.obfs {
+                if !obfs.is_empty() {
+                    s.push_str(&format!("    obfs: \"{}\"\n", escape_yaml(obfs)));
+                }
+            }
+            if let Some(rwc) = hy.recv_window_conn {
+                s.push_str(&format!("    recv-window-conn: {}\n", rwc));
+            }
+            if let Some(rw) = hy.recv_window {
+                s.push_str(&format!("    recv-window: {}\n", rw));
+            }
+            if let Some(dmd) = hy.disable_mtu_discovery {
+                s.push_str(&format!("    disable_mtu_discovery: {}\n", dmd));
+            }
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, true);
         }
         ProtocolConfig::Hysteria2(hy2) => {
             s.push_str("    type: hysteria2\n");
             s.push_str(&format!("    server: \"{}\"\n", escape_yaml(&node.server)));
             s.push_str(&format!("    port: {}\n", node.port));
+            if let Some(ports_raw) = &hy2.ports {
+                let normalized = ports_raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(|p| p.replace(':', "-"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !normalized.is_empty() {
+                    s.push_str(&format!("    ports: \"{}\"\n", escape_yaml(&normalized)));
+                }
+            }
+            if let Some(hop) = hy2.hop_interval {
+                if hop > 0 {
+                    s.push_str(&format!("    hop-interval: {}\n", hop));
+                }
+            }
             s.push_str(&format!(
                 "    password: \"{}\"\n",
                 escape_yaml(&hy2.password)
@@ -290,12 +429,7 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
                 s.push_str(&format!("    obfs: {}\n", ot));
                 s.push_str(&format!("    obfs-password: \"{}\"\n", escape_yaml(op)));
             }
-            let sni = node
-                .tls
-                .as_ref()
-                .and_then(|t| t.server_name.as_deref())
-                .unwrap_or(&node.server);
-            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, true);
         }
         ProtocolConfig::Tuic(tuic) => {
             s.push_str("    type: tuic\n");
@@ -312,24 +446,41 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
             if let Some(mode) = &tuic.udp_relay_mode {
                 s.push_str(&format!("    udp-relay-mode: {}\n", mode));
             }
-            let sni = node
-                .tls
-                .as_ref()
-                .and_then(|t| t.server_name.as_deref())
-                .unwrap_or(&node.server);
-            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
-            s.push_str("    reduce-rtt: true\n");
+            if let Some(hb) = &tuic.heartbeat {
+                if let Ok(ms_or_s) = hb.trim().trim_end_matches('s').parse::<u64>() {
+                    let ms = if hb.trim().ends_with('s') {
+                        ms_or_s * 1000
+                    } else {
+                        ms_or_s
+                    };
+                    s.push_str(&format!("    heartbeat-interval: {}\n", ms));
+                }
+            }
+            s.push_str(&format!(
+                "    reduce-rtt: {}\n",
+                tuic.zero_rtt_handshake.unwrap_or(false)
+            ));
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, true);
         }
         ProtocolConfig::WireGuard(wg) => {
             s.push_str("    type: wireguard\n");
             s.push_str(&format!("    server: \"{}\"\n", escape_yaml(&node.server)));
             s.push_str(&format!("    port: {}\n", node.port));
-            let ip = wg
+            let ipv4 = wg
                 .local_address
-                .first()
+                .iter()
+                .find(|a| !a.contains(':'))
                 .and_then(|a| a.split('/').next())
                 .unwrap_or("10.0.0.2");
-            s.push_str(&format!("    ip: {}\n", ip));
+            s.push_str(&format!("    ip: {}\n", ipv4));
+            if let Some(ipv6) = wg
+                .local_address
+                .iter()
+                .find(|a| a.contains(':'))
+                .and_then(|a| a.split('/').next())
+            {
+                s.push_str(&format!("    ipv6: {}\n", ipv6));
+            }
             s.push_str(&format!("    private-key: {}\n", wg.private_key));
             s.push_str(&format!("    public-key: {}\n", wg.public_key));
             if let Some(psk) = &wg.preshared_key {
@@ -351,13 +502,26 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
                 "    password: \"{}\"\n",
                 escape_yaml(&atls.password)
             ));
-            let sni = node
-                .tls
-                .as_ref()
-                .and_then(|t| t.server_name.as_deref())
-                .unwrap_or(&node.server);
-            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
-            s.push_str("    client-fingerprint: chrome\n");
+            if let Some(chk) = &atls.idle_session_check_interval {
+                if !chk.trim().is_empty() {
+                    s.push_str(&format!(
+                        "    idle-session-check-interval: {}\n",
+                        chk.trim().trim_end_matches('s')
+                    ));
+                }
+            }
+            if let Some(timeout) = &atls.idle_session_timeout {
+                if !timeout.trim().is_empty() {
+                    s.push_str(&format!(
+                        "    idle-session-timeout: {}\n",
+                        timeout.trim().trim_end_matches('s')
+                    ));
+                }
+            }
+            if let Some(min_idle) = atls.min_idle_session {
+                s.push_str(&format!("    min-idle-session: {}\n", min_idle));
+            }
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, true);
         }
         ProtocolConfig::Snell(snell) => {
             s.push_str("    type: snell\n");
@@ -376,6 +540,16 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
             s.push_str(&format!("    server: \"{}\"\n", escape_yaml(&node.server)));
             s.push_str(&format!("    port: {}\n", node.port));
             s.push_str(&format!("    transport: {}\n", mieru.transport));
+            if let Some(pr) = &mieru.port_range {
+                if !pr.is_empty() {
+                    s.push_str(&format!("    port-range: \"{}\"\n", escape_yaml(pr)));
+                }
+            }
+            if let Some(mux) = &mieru.multiplexing {
+                if !mux.is_empty() {
+                    s.push_str(&format!("    multiplexing: {}\n", mux));
+                }
+            }
             s.push_str(&format!(
                 "    username: \"{}\"\n",
                 escape_yaml(&mieru.username)
@@ -396,6 +570,21 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
             if let Some(pk) = &ssh.private_key {
                 s.push_str(&format!("    private-key: \"{}\"\n", escape_yaml(pk)));
             }
+            if let Some(pp) = &ssh.private_key_passphrase {
+                s.push_str(&format!(
+                    "    private-key-passphrase: \"{}\"\n",
+                    escape_yaml(pp)
+                ));
+            }
+            if !ssh.host_key.is_empty() {
+                s.push_str(&format!("    host-key: {:?}\n", ssh.host_key));
+            }
+            if !ssh.host_key_algorithms.is_empty() {
+                s.push_str(&format!(
+                    "    host-key-algorithms: {:?}\n",
+                    ssh.host_key_algorithms
+                ));
+            }
         }
         ProtocolConfig::Socks5(s5) => {
             s.push_str("    type: socks5\n");
@@ -405,7 +594,8 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
                 s.push_str(&format!("    username: \"{}\"\n", escape_yaml(u)));
                 s.push_str(&format!("    password: \"{}\"\n", escape_yaml(p)));
             }
-            s.push_str("    udp: true\n");
+            s.push_str(&format!("    udp: {}\n", s5.udp));
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, false);
         }
         ProtocolConfig::Http(http) => {
             s.push_str("    type: http\n");
@@ -415,14 +605,7 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
                 s.push_str(&format!("    username: \"{}\"\n", escape_yaml(u)));
                 s.push_str(&format!("    password: \"{}\"\n", escape_yaml(p)));
             }
-            if let Some(tls) = &node.tls {
-                if tls.enabled {
-                    s.push_str("    tls: true\n");
-                    if let Some(sni) = &tls.server_name {
-                        s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
-                    }
-                }
-            }
+            append_mihomo_tls_fields(&mut s, node.tls.as_ref(), &node.server, false);
         }
         ProtocolConfig::Naive(naive) => {
             s.push_str("    type: http\n");
@@ -436,18 +619,46 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
                 "    password: \"{}\"\n",
                 escape_yaml(&naive.password)
             ));
-            s.push_str("    tls: true\n");
-            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(&node.server)));
+            if let Some(tls) = &node.tls {
+                append_mihomo_tls_fields(&mut s, Some(tls), &node.server, false);
+            } else {
+                s.push_str("    tls: true\n");
+                s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(&node.server)));
+            }
+            if !naive.extra_headers.is_empty() {
+                s.push_str("    headers:\n");
+                for (k, v) in &naive.extra_headers {
+                    s.push_str(&format!("      {}: \"{}\"\n", k, escape_yaml(v)));
+                }
+            }
         }
         ProtocolConfig::ShadowTls(_) => {
-            // Mihomo doesn't support raw shadow-tls outbound, return None or fallback
+            // Mihomo doesn't support standalone raw shadow-tls outbound
             return None;
         }
     }
 
     if let Some(dialer) = &node.dialer_proxy {
-        if !dialer.is_empty() {
-            s.push_str(&format!("    dialer-proxy: \"{}\"\n", escape_yaml(dialer)));
+        let trimmed = dialer.trim();
+        if !trimmed.is_empty() && trimmed != node.id && trimmed != yaml_name {
+            if let Some(resolved_name) = valid_supported_ids
+                .contains(trimmed)
+                .then(|| id_to_name.get(trimmed))
+                .flatten()
+                .cloned()
+                .or_else(|| {
+                    valid_supported_ids
+                        .iter()
+                        .filter_map(|id| id_to_name.get(id))
+                        .find(|name| name.as_str() == trimmed)
+                        .cloned()
+                })
+            {
+                s.push_str(&format!(
+                    "    dialer-proxy: \"{}\"\n",
+                    escape_yaml(&resolved_name)
+                ));
+            }
         }
     }
 
@@ -455,13 +666,31 @@ fn compile_mihomo_proxy_yaml(node: &ProxyNode) -> Option<String> {
 }
 
 fn append_mihomo_tls_yaml(s: &mut String, tls: Option<&TlsConfig>, default_sni: &str) {
-    let Some(tls) = tls else { return };
-    if !tls.enabled {
+    append_mihomo_tls_fields(s, tls, default_sni, false);
+}
+
+fn append_mihomo_tls_fields(
+    s: &mut String,
+    tls: Option<&TlsConfig>,
+    default_sni: &str,
+    implicit_tls: bool,
+) {
+    let Some(tls) = tls else {
+        if implicit_tls {
+            s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(default_sni)));
+        }
+        return;
+    };
+    if !tls.enabled && !implicit_tls {
         return;
     }
-    s.push_str("    tls: true\n");
     let sni = tls.server_name.as_deref().unwrap_or(default_sni);
-    s.push_str(&format!("    servername: \"{}\"\n", escape_yaml(sni)));
+    if implicit_tls {
+        s.push_str(&format!("    sni: \"{}\"\n", escape_yaml(sni)));
+    } else {
+        s.push_str("    tls: true\n");
+        s.push_str(&format!("    servername: \"{}\"\n", escape_yaml(sni)));
+    }
     if tls.insecure {
         s.push_str("    skip-cert-verify: true\n");
     }
@@ -489,13 +718,36 @@ fn append_mihomo_tls_yaml(s: &mut String, tls: Option<&TlsConfig>, default_sni: 
 fn append_mihomo_transport_yaml(s: &mut String, transport: Option<&TransportConfig>) {
     let Some(transport) = transport else { return };
     match transport {
-        TransportConfig::Ws { path, host, .. } => {
+        TransportConfig::Ws {
+            path,
+            host,
+            headers,
+            max_early_data,
+            early_data_header_name,
+        } => {
             s.push_str("    network: ws\n");
             s.push_str("    ws-opts:\n");
             s.push_str(&format!("      path: \"{}\"\n", escape_yaml(path)));
+            let mut merged_headers = headers.clone();
             if let Some(h) = host {
+                merged_headers.insert("Host".to_string(), h.clone());
+            }
+            if !merged_headers.is_empty() {
                 s.push_str("      headers:\n");
-                s.push_str(&format!("        Host: \"{}\"\n", escape_yaml(h)));
+                for (k, v) in merged_headers {
+                    s.push_str(&format!("        {}: \"{}\"\n", k, escape_yaml(&v)));
+                }
+            }
+            if let Some(ed) = max_early_data {
+                s.push_str(&format!("      max-early-data: {ed}\n"));
+            }
+            if let Some(eh) = early_data_header_name {
+                if !eh.trim().is_empty() {
+                    s.push_str(&format!(
+                        "      early-data-header-name: \"{}\"\n",
+                        escape_yaml(eh.trim())
+                    ));
+                }
             }
         }
         TransportConfig::Grpc { service_name, .. } => {
@@ -522,12 +774,61 @@ fn append_mihomo_transport_yaml(s: &mut String, transport: Option<&TransportConf
                 s.push_str(&format!("      host: \"{}\"\n", escape_yaml(h)));
             }
         }
+        TransportConfig::Tcp {
+            header_type,
+            http_host,
+            http_path,
+        } if header_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("http")) =>
+        {
+            s.push_str("    network: http\n");
+            s.push_str("    http-opts:\n");
+            s.push_str(&format!(
+                "      path: [\"{}\"]\n",
+                escape_yaml(http_path.as_deref().unwrap_or("/"))
+            ));
+            if !http_host.is_empty() {
+                s.push_str(&format!("      headers:\n        Host: {:?}\n", http_host));
+            }
+        }
         _ => {}
     }
 }
 
+fn parse_ss_plugin_opts_map(plugin: &str, raw_opts: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for pair in raw_opts.split(';') {
+        let trimmed = pair.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (raw_k, raw_v) = match trimmed.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None if trimmed.eq_ignore_ascii_case("tls") && plugin == "v2ray-plugin" => {
+                ("tls", "true")
+            }
+            None => continue,
+        };
+        let key = match (plugin, raw_k) {
+            ("obfs", "obfs") => "mode",
+            ("obfs", "obfs-host") => "host",
+            _ => raw_k,
+        };
+        if !key.is_empty() && !raw_v.is_empty() {
+            out.push((key.to_string(), raw_v.to_string()));
+        }
+    }
+    out
+}
+
 fn escape_yaml(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace('\0', "")
 }
 
 #[cfg(test)]

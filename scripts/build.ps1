@@ -12,10 +12,14 @@ $projectRoot = (Get-Item -Path $scriptDir).Parent.FullName
 
 Set-Location $projectRoot
 
-$mingwBin = "C:\Users\31752\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
+$mingwBin = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin"
 $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 
-$env:PATH = "$mingwBin;$cargoBin;$env:PATH"
+if (Test-Path $mingwBin) {
+    $env:PATH = "$mingwBin;$cargoBin;$env:PATH"
+} else {
+    $env:PATH = "$cargoBin;$env:PATH"
+}
 $env:CARGO_TARGET_DIR = "$env:USERPROFILE\.cargo\target_novaproxy"
 
 Write-Host "=== Building NovaProxy Frontend ===" -ForegroundColor Cyan

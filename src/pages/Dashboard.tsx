@@ -27,6 +27,10 @@ import {
   listNodes,
   getCoreTraffic,
   onCoreStatusChange,
+  getAndroidVpnStatus,
+  prepareAndroidVpn,
+  logFrontendEvent,
+  type AndroidVpnStatus,
   type CoreStatusInfo,
 } from "../lib/ipc";
 import { formatSpeed, formatLatency, getProtocolBadge } from "../lib/utils";
@@ -50,74 +54,99 @@ export const Dashboard: React.FC = () => {
     trafficHistory,
     addTrafficPoint,
     setCurrentTab,
+    platformInfo,
   } = useAppStore();
 
   const [status, setStatus] = useState<CoreStatusInfo | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
   const [isElevated, setIsElevated] = useState<boolean>(false);
+  const [androidVpnStatus, setAndroidVpnStatus] = useState<AndroidVpnStatus | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [currentSpeed, setCurrentSpeed] = useState<{ up: number; down: number }>({
     up: 0,
     down: 0,
   });
 
-  // Initial load
+  // Initial load & live resync helper (also refreshes after background failover / sysproxy updates)
   useEffect(() => {
-    // 1. Fetch app settings
-    getAppSettings()
-      .then((s) => {
-        setAppSettings(s);
-        setSystemProxy(s.system_proxy);
-        setTunMode(s.tun_mode);
-        setRoutingMode(s.routing_mode);
-      })
-      .catch(() => {});
+    let active = true;
 
-    // 2. Fetch elevation
-    isProcessElevated().then(setIsElevated).catch(() => {});
+    const syncDashboardState = async (coreState?: CoreStatusInfo) => {
+      try {
+        const [settingsRes, elevatedRes, sysproxyRes, statusRes, nodesRes] =
+          await Promise.allSettled([
+            getAppSettings(),
+            isProcessElevated(),
+            getSysproxyStatus(),
+            coreState ? Promise.resolve(coreState) : coreStatus(),
+            listNodes(),
+          ]);
+        if (!active) return;
 
-    // 3. Fetch sysproxy status
-    getSysproxyStatus()
-      .then((snap) => {
-        setSystemProxy(snap.enabled);
-      })
-      .catch(() => {});
-
-    // 4. Fetch core status
-    coreStatus()
-      .then((s) => {
-        setStatus(s);
-        setIsConnected(s.lifecycle.state === "running");
-      })
-      .catch(() => {});
-
-    // 5. Fetch active node
-    listNodes()
-      .then((nodes) => {
-        if (nodes.length > 0) {
-          getAppSettings().then((s) => {
-            const found = nodes.find((n) => n.id === s.active_node_id);
-            setActiveNode(found || nodes[0]);
-          });
+        const currentStatus =
+          statusRes.status === "fulfilled" ? statusRes.value : null;
+        if (currentStatus) {
+          setStatus(currentStatus);
+          setIsConnected(currentStatus.lifecycle.state === "running");
         }
-      })
-      .catch(() => {});
+        const running = currentStatus?.lifecycle.state === "running";
 
-    // Listen for core status transitions
+        const loadedSettings =
+          settingsRes.status === "fulfilled" ? settingsRes.value : null;
+        if (loadedSettings) {
+          setAppSettings(loadedSettings);
+          setTunMode(loadedSettings.tun_mode);
+          setRoutingMode(loadedSettings.routing_mode);
+        }
+
+        if (elevatedRes.status === "fulfilled") {
+          setIsElevated(elevatedRes.value);
+        }
+
+        if (platformInfo?.os === "android") {
+          const vpnRes = await getAndroidVpnStatus().catch(() => null);
+          if (active && vpnRes) setAndroidVpnStatus(vpnRes);
+        }
+
+        if (running && sysproxyRes.status === "fulfilled") {
+          setSystemProxy(sysproxyRes.value.enabled);
+        } else if (loadedSettings) {
+          setSystemProxy(loadedSettings.system_proxy);
+        }
+
+        if (nodesRes.status === "fulfilled") {
+          const nodes = nodesRes.value;
+          if (nodes.length === 0) {
+            setActiveNode(null);
+          } else {
+            const activeId = loadedSettings?.active_node_id;
+            const found = activeId ? nodes.find((n) => n.id === activeId) : undefined;
+            setActiveNode(found || nodes[0]);
+          }
+        }
+      } catch {
+        // ignore transient fetch errors
+      }
+    };
+
+    void syncDashboardState();
+
+    // Listen for core status transitions (including background failover or tray actions)
     let unlisten: (() => void) | undefined;
     onCoreStatusChange((newStatus) => {
-      setStatus(newStatus);
-      setIsConnected(newStatus.lifecycle.state === "running");
+      void syncDashboardState(newStatus);
     })
       .then((fn) => {
-        unlisten = fn;
+        if (active) unlisten = fn;
+        else fn();
       })
       .catch(() => {});
 
     return () => {
+      active = false;
       if (unlisten) unlisten();
     };
-  }, [setAppSettings, setIsConnected, setRoutingMode, setActiveNode, setSystemProxy, setTunMode]);
+  }, [setAppSettings, setIsConnected, setRoutingMode, setActiveNode, setSystemProxy, setTunMode, platformInfo?.os]);
 
   // Periodic traffic sampling
   useEffect(() => {
@@ -150,14 +179,25 @@ export const Dashboard: React.FC = () => {
         const s = await coreStop();
         setStatus(s);
         setIsConnected(false);
+        const freshSettings = await getAppSettings().catch(() => null);
+        if (freshSettings) {
+          setAppSettings(freshSettings);
+          setSystemProxy(freshSettings.system_proxy);
+        }
       } else {
         const s = await coreStart();
         setStatus(s);
-        setIsConnected(s.lifecycle.state === "running");
+        const running = s.lifecycle.state === "running";
+        setIsConnected(running);
+        if (running) {
+          const snap = await getSysproxyStatus().catch(() => null);
+          if (snap) setSystemProxy(snap.enabled);
+        }
       }
     } catch (err) {
-      setErrorMsg(String(err));
-    } finally {
+        setErrorMsg(String(err));
+        void logFrontendEvent("error", "Dashboard.connect", String(err));
+      } finally {
       setBusy(false);
     }
   };
@@ -167,7 +207,11 @@ export const Dashboard: React.FC = () => {
     try {
       const target = !systemProxy;
       const snap = await setSysproxy(target);
-      setSystemProxy(snap.enabled);
+      const freshSettings = await getAppSettings().catch(() => null);
+      if (freshSettings) {
+        setAppSettings(freshSettings);
+      }
+      setSystemProxy(isConnected ? snap.enabled : (freshSettings?.system_proxy ?? target));
     } catch (err) {
       setErrorMsg(String(err));
     }
@@ -175,12 +219,22 @@ export const Dashboard: React.FC = () => {
 
   // Toggle TUN mode
   const handleToggleTun = async () => {
-    if (!isElevated && !tunMode) {
-      setErrorMsg("TUN mode requires administrator privileges. Please relaunch as admin.");
+    const isAndroid = platformInfo?.os === "android";
+    if (!isAndroid && !isElevated && !tunMode) {
+      setErrorMsg(t("dashboard.tunAdminRequired"));
       return;
     }
     try {
       const target = !tunMode;
+      if (isAndroid && target) {
+        const granted = await prepareAndroidVpn();
+        const vpnRes = await getAndroidVpnStatus().catch(() => null);
+        if (vpnRes) setAndroidVpnStatus(vpnRes);
+        if (!granted) {
+          setErrorMsg(t("dashboard.androidVpnNeedsPermission"));
+          return;
+        }
+      }
       if (appSettings) {
         const updated = { ...appSettings, tun_mode: target };
         await saveAppSettings(updated);
@@ -194,6 +248,7 @@ export const Dashboard: React.FC = () => {
       }
     } catch (err) {
       setErrorMsg(String(err));
+      void logFrontendEvent("error", "Dashboard.tun", String(err));
     }
   };
 
@@ -226,9 +281,12 @@ export const Dashboard: React.FC = () => {
   }, [activeNode]);
 
   const activePort = status?.actual_mixed_port ?? appSettings?.mixed_port ?? 7890;
+  const showSystemProxyCard = platformInfo?.supports_system_proxy ?? true;
+  const isAndroid = platformInfo?.os === "android";
+  const isWindows = !platformInfo || platformInfo.os === "windows";
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-6">
+    <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6">
       {/* Top Alert if error exists */}
       {errorMsg && (
         <div className="p-4 rounded-2xl bg-destructive/10 border border-destructive/20 text-destructive text-xs flex items-center justify-between">
@@ -266,7 +324,9 @@ export const Dashboard: React.FC = () => {
             </button>
             <div className="text-center">
               <span className="text-xs text-muted-foreground">
-                {isConnected ? `Listening on port :${activePort}` : "Ready to connect"}
+                {isConnected
+                  ? t("dashboard.listeningOnPort", { port: activePort })
+                  : t("dashboard.readyToConnect")}
               </span>
             </div>
           </div>
@@ -312,7 +372,7 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* Control Strip: Routing Mode + System Proxy + TUN Mode */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className={`grid grid-cols-1 ${showSystemProxyCard ? "md:grid-cols-3" : "md:grid-cols-2"} gap-4`}>
         {/* 1. Routing Mode */}
         <div className="bg-card border border-border rounded-2xl p-5 shadow-sm space-y-3">
           <div className="flex items-center justify-between">
@@ -332,7 +392,7 @@ export const Dashboard: React.FC = () => {
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Rule
+              {t("dashboard.modeRule")}
             </button>
             <button
               onClick={() => handleRoutingModeChange("global")}
@@ -342,7 +402,7 @@ export const Dashboard: React.FC = () => {
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Global
+              {t("dashboard.modeGlobal")}
             </button>
             <button
               onClick={() => handleRoutingModeChange("direct")}
@@ -352,35 +412,37 @@ export const Dashboard: React.FC = () => {
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              Direct
+              {t("dashboard.modeDirect")}
             </button>
           </div>
         </div>
 
-        {/* 2. System Proxy */}
-        <div className="bg-card border border-border rounded-2xl p-5 shadow-sm flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
-              <Zap className="w-4 h-4" />
+        {/* 2. System Proxy (Desktop Only) */}
+        {showSystemProxyCard && (
+          <div className="bg-card border border-border rounded-2xl p-5 shadow-sm flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
+                <Zap className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-xs font-semibold block">{t("dashboard.systemProxy")}</span>
+                <span className="text-[11px] text-muted-foreground">{t("dashboard.wininetRegistry")}</span>
+              </div>
             </div>
-            <div>
-              <span className="text-xs font-semibold block">{t("dashboard.systemProxy")}</span>
-              <span className="text-[11px] text-muted-foreground">WinINet Registry</span>
-            </div>
-          </div>
-          <button
-            onClick={handleToggleSysproxy}
-            className={`w-12 h-6 rounded-full transition-colors relative flex items-center p-0.5 ${
-              systemProxy ? "bg-primary" : "bg-secondary"
-            }`}
-          >
-            <span
-              className={`w-5 h-5 rounded-full bg-white transition-transform ${
-                systemProxy ? "translate-x-6" : "translate-x-0"
+            <button
+              onClick={handleToggleSysproxy}
+              className={`w-12 h-6 rounded-full transition-colors relative flex items-center p-0.5 ${
+                systemProxy ? "bg-primary" : "bg-secondary"
               }`}
-            />
-          </button>
-        </div>
+            >
+              <span
+                className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                  systemProxy ? "translate-x-6" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+        )}
 
         {/* 3. TUN Mode */}
         <div className="bg-card border border-border rounded-2xl p-5 shadow-sm flex items-center justify-between">
@@ -390,22 +452,39 @@ export const Dashboard: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-semibold block">{t("dashboard.tunMode")}</span>
-                {!isElevated && (
+                <span className="text-xs font-semibold block">
+                  {isAndroid ? t("dashboard.androidVpnTitle") : t("dashboard.tunMode")}
+                </span>
+                {!isAndroid && isWindows && !isElevated && (
                   <span className="text-[10px] bg-amber-500/10 text-amber-500 px-1.5 py-0.2 rounded font-medium">
                     UAC
                   </span>
                 )}
+                {isAndroid && androidVpnStatus && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded font-medium ${
+                      androidVpnStatus.prepared
+                        ? "bg-emerald-500/10 text-emerald-400"
+                        : "bg-amber-500/10 text-amber-500"
+                    }`}
+                  >
+                    {androidVpnStatus.prepared
+                      ? t("dashboard.androidVpnPrepared")
+                      : t("dashboard.grantVpnConsent")}
+                  </span>
+                )}
               </div>
-              <span className="text-[11px] text-muted-foreground">Virtual NIC</span>
+              <span className="text-[11px] text-muted-foreground">
+                {isAndroid ? t("dashboard.androidVpnSubtitle") : t("dashboard.virtualNic")}
+              </span>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            {!isElevated && (
+            {!isAndroid && isWindows && !isElevated && (
               <button
                 onClick={() => requestAdminRelaunch().catch(() => {})}
-                title="Relaunch as administrator to enable TUN"
+                title={t("dashboard.relaunchAdminHint")}
                 className="p-1 rounded-lg bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 text-xs"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
@@ -473,7 +552,7 @@ export const Dashboard: React.FC = () => {
       {/* Core Runtime Status Pill */}
       {status && (
         <div className="bg-secondary/30 border border-border/50 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Cpu className="w-4 h-4 text-primary" />
             <span>
               {t("dashboard.activeCore")}:{" "}
@@ -486,10 +565,20 @@ export const Dashboard: React.FC = () => {
                 (PID: {status.pid})
               </span>
             )}
+            {status.upstream_core && (
+              <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20 font-medium text-[11px]">
+                {t("dashboard.multiCoreRelay")}: +{status.upstream_core}
+                {status.upstream_pid ? ` (PID: ${status.upstream_pid})` : ""}
+                {status.relay_port ? ` :${status.relay_port}` : ""}
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-4 font-mono text-[11px]">
+          <div className="flex flex-wrap items-center gap-4 font-mono text-[11px]">
             <span>Mixed Port: {activePort}</span>
+            {status.actual_clash_api_port && (
+              <span>API: {status.actual_clash_api_port}</span>
+            )}
             {status.port_reassigned && (
               <span className="text-amber-500 font-sans font-medium">
                 {t("dashboard.portReassigned")}

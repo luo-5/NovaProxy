@@ -12,12 +12,19 @@ pub use settings::*;
 pub use subscription::*;
 
 use crate::core::{
-    CapabilityRule, CoreCapabilities, CoreLifecycleState, CoreLockEntry, CoreSelection,
-    CoreStartRequest, CoreStatusInfo, CoreUpdateCheckResult, CoreUpdateResult, SelectionReason,
+    CapabilityRule, CoreBinaryStatus, CoreCapabilities, CoreLifecycleState, CoreLockEntry,
+    CoreSelection, CoreStartRequest, CoreStatusInfo, CoreUpdateCheckResult, CoreUpdateResult,
+    SelectionReason,
 };
-use crate::monitor::{CoreLogEntry, LogStream};
+use crate::monitor::{
+    CoreLogEntry, CoreStartSample, CrashSample, DiagnosticBundleResult, FrontendErrorSample,
+    InsightSeverity, LatencyTestMode, LogFileInfo, LogStream, OptimizationInsight,
+    ProtocolLatencyStats, TelemetrySummary, TrafficSnapshot,
+};
 use crate::parser::{SubscriptionFormat, SubscriptionParseReport, SubscriptionUserInfo};
-use crate::system::{SysProxySnapshot, TunSettings};
+use crate::system::{
+    PlatformInfo, ServiceState, SysProxySnapshot, TunSettings, UrlSchemeStatus, WintunStatus,
+};
 use ts_rs::TS;
 
 /// Generates consolidated TypeScript type definitions for all IPC models using `ts-rs`
@@ -57,6 +64,15 @@ pub fn generate_typescript_bindings() -> String {
         AppSettings::decl(),
         LogStream::decl(),
         CoreLogEntry::decl(),
+        LogFileInfo::decl(),
+        DiagnosticBundleResult::decl(),
+        CoreStartSample::decl(),
+        ProtocolLatencyStats::decl(),
+        FrontendErrorSample::decl(),
+        CrashSample::decl(),
+        InsightSeverity::decl(),
+        OptimizationInsight::decl(),
+        TelemetrySummary::decl(),
         CoreLifecycleState::decl(),
         CoreStatusInfo::decl(),
         CoreStartRequest::decl(),
@@ -65,8 +81,11 @@ pub fn generate_typescript_bindings() -> String {
         SelectionReason::decl(),
         CoreSelection::decl(),
         CoreLockEntry::decl(),
+        CoreBinaryStatus::decl(),
         CoreUpdateCheckResult::decl(),
         CoreUpdateResult::decl(),
+        LatencyTestMode::decl(),
+        TrafficSnapshot::decl(),
         SubscriptionFormat::decl(),
         SubscriptionParseReport::decl(),
         SubscriptionUserInfo::decl(),
@@ -76,7 +95,11 @@ pub fn generate_typescript_bindings() -> String {
         RoutingSettings::decl(),
         DnsStrategy::decl(),
         DnsSettings::decl(),
+        PlatformInfo::decl(),
         SysProxySnapshot::decl(),
+        ServiceState::decl(),
+        WintunStatus::decl(),
+        UrlSchemeStatus::decl(),
         TunSettings::decl(),
     ];
 

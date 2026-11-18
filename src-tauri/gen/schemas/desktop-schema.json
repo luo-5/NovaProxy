@@ -387,6 +387,72 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Default permissions for NovaProxy Android VPN bridge\n#### This default permission set includes:\n\n- `allow-prepare-vpn`\n- `allow-start-vpn`\n- `allow-stop-vpn`\n- `allow-get-vpn-status`\n- `allow-get-native-lib-dir`",
+          "type": "string",
+          "const": "android-vpn:default",
+          "markdownDescription": "Default permissions for NovaProxy Android VPN bridge\n#### This default permission set includes:\n\n- `allow-prepare-vpn`\n- `allow-start-vpn`\n- `allow-stop-vpn`\n- `allow-get-vpn-status`\n- `allow-get-native-lib-dir`"
+        },
+        {
+          "description": "Enables the get_native_lib_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:allow-get-native-lib-dir",
+          "markdownDescription": "Enables the get_native_lib_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_vpn_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:allow-get-vpn-status",
+          "markdownDescription": "Enables the get_vpn_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the prepare_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:allow-prepare-vpn",
+          "markdownDescription": "Enables the prepare_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:allow-start-vpn",
+          "markdownDescription": "Enables the start_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:allow-stop-vpn",
+          "markdownDescription": "Enables the stop_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_native_lib_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:deny-get-native-lib-dir",
+          "markdownDescription": "Denies the get_native_lib_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_vpn_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:deny-get-vpn-status",
+          "markdownDescription": "Denies the get_vpn_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the prepare_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:deny-prepare-vpn",
+          "markdownDescription": "Denies the prepare_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:deny-start-vpn",
+          "markdownDescription": "Denies the start_vpn command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_vpn command without any pre-configured scope.",
+          "type": "string",
+          "const": "android-vpn:deny-stop-vpn",
+          "markdownDescription": "Denies the stop_vpn command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

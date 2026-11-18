@@ -1,7 +1,13 @@
-//! Windows process elevation checks and UAC relaunch
+//! Cross-platform process privilege inspection & admin elevation relaunch:
+//! - Windows: TokenElevation + ShellExecuteExW("runas")
+//! - macOS: geteuid() == 0 + osascript administrator prompt
+//! - Linux: geteuid() == 0 or CAP_NET_ADMIN + pkexec GUI relaunch
+//! - Android: No root required (VpnService uses OS VPN consent dialog)
 
 use super::sysproxy::SystemError;
+#[cfg(target_os = "windows")]
 use std::ffi::c_void;
+#[cfg(target_os = "windows")]
 use std::ptr::{null, null_mut};
 
 #[cfg(target_os = "windows")]
@@ -75,7 +81,23 @@ mod win32 {
     }
 }
 
-/// Checks whether the current process is running with Administrator / elevated token
+#[cfg(target_os = "linux")]
+pub fn linux_has_cap_net_admin() -> bool {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return false;
+    };
+    for line in status.lines() {
+        if let Some(hex_val) = line.strip_prefix("CapEff:") {
+            if let Ok(caps) = u64::from_str_radix(hex_val.trim(), 16) {
+                // CAP_NET_ADMIN is bit 12
+                return (caps & (1u64 << 12)) != 0;
+            }
+        }
+    }
+    false
+}
+
+/// Checks whether the current process has OS privileges needed for TUN virtual adapters
 pub fn is_elevated() -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -101,13 +123,32 @@ pub fn is_elevated() -> bool {
             success != 0 && elevation.token_is_elevated != 0
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unsafe { libc::geteuid() == 0 }
+        || linux_has_cap_net_admin()
+    }
+    #[cfg(target_os = "android")]
+    {
+        // On Android, VpnService grants user-consented TUN access without root
+        true
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     {
         false
     }
 }
 
-/// Relaunches the current executable with Administrator elevation prompt (UAC)
+/// Relaunches the current executable with Administrator / root elevation prompt
 pub fn relaunch_as_admin(args: &[&str]) -> Result<(), SystemError> {
     #[cfg(target_os = "windows")]
     {
@@ -157,10 +198,59 @@ pub fn relaunch_as_admin(args: &[&str]) -> Result<(), SystemError> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
+        let exe = std::env::current_exe()?;
+        let joined_args = args
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let shell_cmd = format!(
+            "'{}' {} >/dev/null 2>&1 &",
+            exe.to_string_lossy().replace('\'', "'\\''"),
+            joined_args
+        );
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            shell_cmd.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let status = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status()?;
+        if !status.success() {
+            return Err(SystemError::General(
+                "macOS administrator authorization cancelled or failed".into(),
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new("pkexec");
+        cmd.arg("env");
+        for var in [
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ] {
+            if let Ok(val) = std::env::var(var) {
+                cmd.arg(format!("{var}={val}"));
+            }
+        }
+        cmd.arg(exe);
+        cmd.args(args);
+        cmd.spawn()?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = args;
         Err(SystemError::General(
-            "Elevation not supported on this OS".into(),
+            "Privilege relaunch is not applicable on this OS".into(),
         ))
     }
 }
@@ -172,6 +262,6 @@ mod tests {
     #[test]
     fn test_is_elevated_does_not_panic() {
         let elevated = is_elevated();
-        println!("Running as elevated/admin: {}", elevated);
+        println!("Running with TUN/admin privileges: {}", elevated);
     }
 }

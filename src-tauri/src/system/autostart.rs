@@ -1,9 +1,18 @@
-//! Windows autostart configuration via Registry Run key
+//! Cross-platform autostart configuration:
+//! - Windows: HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+//! - macOS: ~/Library/LaunchAgents/com.novaproxy.app.plist
+//! - Linux: ~/.config/autostart/novaproxy.desktop
+//! - Android: Managed by OS (returns false / unsupported)
 
 use super::sysproxy::SystemError;
+#[cfg(target_os = "windows")]
 use std::ffi::c_void;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::path::PathBuf;
+#[cfg(target_os = "windows")]
 use std::ptr::null_mut;
 
+#[cfg(target_os = "windows")]
 const RUN_KEY_NAME: &str = "NovaProxy";
 
 #[cfg(target_os = "windows")]
@@ -57,6 +66,23 @@ mod win32 {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_plist_path() -> Result<PathBuf, SystemError> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| SystemError::General("Cannot determine user home directory".into()))?;
+    Ok(home
+        .join("Library")
+        .join("LaunchAgents")
+        .join("com.novaproxy.app.plist"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_desktop_entry_path() -> Result<PathBuf, SystemError> {
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| SystemError::General("Cannot determine XDG config directory".into()))?;
+    Ok(config_dir.join("autostart").join("novaproxy.desktop"))
+}
+
 /// Checks whether autostart is currently enabled for NovaProxy
 pub fn is_autostart_enabled() -> Result<bool, SystemError> {
     #[cfg(target_os = "windows")]
@@ -89,7 +115,29 @@ pub fn is_autostart_enabled() -> Result<bool, SystemError> {
             Ok(ret == 0 && val_type == REG_SZ && data_len > 0)
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos_plist_path()?.exists())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path = linux_desktop_entry_path()?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        Ok(!raw.contains("X-GNOME-Autostart-enabled=false") && !raw.contains("Hidden=true"))
+    }
+    #[cfg(target_os = "android")]
+    {
+        Ok(false)
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     {
         Ok(false)
     }
@@ -145,7 +193,85 @@ pub fn set_autostart(enabled: bool) -> Result<bool, SystemError> {
         }
         Ok(enabled)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = macos_plist_path()?;
+        if enabled {
+            if let Some(parent) = plist_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let current_exe = std::env::current_exe()?;
+            let exe_escaped = current_exe
+                .to_string_lossy()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let plist = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.novaproxy.app</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe_escaped}</string>
+    <string>--minimized</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#
+            );
+            std::fs::write(&plist_path, plist)?;
+        } else if plist_path.exists() {
+            std::fs::remove_file(&plist_path)?;
+        }
+        Ok(enabled)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let entry_path = linux_desktop_entry_path()?;
+        if enabled {
+            if let Some(parent) = entry_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let current_exe = std::env::current_exe()?;
+            let desktop = format!(
+                "[Desktop Entry]\n\
+                 Type=Application\n\
+                 Version=1.0\n\
+                 Name=NovaProxy\n\
+                 Comment=High-performance multi-core VPN client\n\
+                 Exec=\"{}\" --minimized\n\
+                 Terminal=false\n\
+                 StartupNotify=false\n\
+                 X-GNOME-Autostart-enabled=true\n",
+                current_exe.to_string_lossy()
+            );
+            std::fs::write(&entry_path, desktop)?;
+        } else if entry_path.exists() {
+            std::fs::remove_file(&entry_path)?;
+        }
+        Ok(enabled)
+    }
+    #[cfg(target_os = "android")]
+    {
+        if enabled {
+            Err(SystemError::General(
+                "Autostart on Android is managed by system VPN Always-On settings".into(),
+            ))
+        } else {
+            Ok(false)
+        }
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     {
         Ok(enabled)
     }
@@ -159,15 +285,12 @@ mod tests {
     fn test_autostart_toggle() {
         let initial = is_autostart_enabled().unwrap();
 
-        // Enable
         set_autostart(true).unwrap();
         assert!(is_autostart_enabled().unwrap());
 
-        // Disable
         set_autostart(false).unwrap();
         assert!(!is_autostart_enabled().unwrap());
 
-        // Restore initial state
         set_autostart(initial).unwrap();
     }
 }

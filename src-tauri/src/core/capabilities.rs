@@ -27,6 +27,30 @@ pub const DEFAULT_CAPABILITIES_JSON: &str = r#"{
       "notes": "VMess over XHTTP or mKCP requires Xray-core"
     },
     {
+      "id": "vless-http-quic-transports",
+      "protocol": "vless",
+      "transports": ["http", "quic"],
+      "default_core": "sing-box",
+      "supported_cores": ["sing-box", "mihomo"],
+      "notes": "Legacy HTTP/H2 and QUIC transports removed in Xray 26.x"
+    },
+    {
+      "id": "vmess-http-quic-transports",
+      "protocol": "vmess",
+      "transports": ["http", "quic"],
+      "default_core": "sing-box",
+      "supported_cores": ["sing-box", "mihomo"],
+      "notes": "Legacy HTTP/H2 and QUIC transports removed in Xray 26.x"
+    },
+    {
+      "id": "trojan-http-quic-transports",
+      "protocol": "trojan",
+      "transports": ["http", "quic"],
+      "default_core": "sing-box",
+      "supported_cores": ["sing-box", "mihomo"],
+      "notes": "Legacy HTTP/H2 and QUIC transports removed in Xray 26.x"
+    },
+    {
       "id": "shadowsocks-general",
       "protocol": "shadowsocks",
       "transports": [],
@@ -79,7 +103,7 @@ pub const DEFAULT_CAPABILITIES_JSON: &str = r#"{
       "protocol": "hysteria2",
       "transports": [],
       "default_core": "sing-box",
-      "supported_cores": ["sing-box", "mihomo", "xray"],
+      "supported_cores": ["sing-box", "mihomo"],
       "notes": "Hysteria2 QUIC protocol"
     },
     {
@@ -111,7 +135,7 @@ pub const DEFAULT_CAPABILITIES_JSON: &str = r#"{
       "protocol": "shadowtls",
       "transports": [],
       "default_core": "sing-box",
-      "supported_cores": ["sing-box", "mihomo"],
+      "supported_cores": ["sing-box"],
       "notes": "ShadowTLS v3"
     },
     {
@@ -233,10 +257,18 @@ impl CoreCapabilities {
         Ok(caps)
     }
 
-    /// Loads default built-in capability matrix
+    /// Loads default built-in capability matrix without panicking.
     pub fn default_table() -> Self {
-        Self::from_json_str(DEFAULT_CAPABILITIES_JSON)
-            .expect("Built-in DEFAULT_CAPABILITIES_JSON must be valid")
+        Self::from_json_str(DEFAULT_CAPABILITIES_JSON).unwrap_or_else(|err| {
+            tracing::error!(
+                error = %err,
+                "Built-in DEFAULT_CAPABILITIES_JSON failed to parse; returning empty capability table"
+            );
+            Self {
+                version: "fallback".to_string(),
+                rules: Vec::new(),
+            }
+        })
     }
 
     pub fn validate(&self) -> Result<(), CapabilityError> {

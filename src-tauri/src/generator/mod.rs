@@ -9,7 +9,7 @@ pub mod xray;
 
 use crate::model::node::{CoreType, ProxyNode};
 use crate::model::routing::{DnsSettings, RoutingSettings};
-use crate::model::settings::AppSettings;
+use crate::model::settings::{AppSettings, RoutingMode};
 use crate::model::subscription::NodeGroup;
 use thiserror::Error;
 
@@ -76,32 +76,50 @@ pub fn generate_multi_core_relay(
     routing: &RoutingSettings,
     relay_port: u16,
 ) -> Result<MultiCoreRelayConfig, GeneratorError> {
-    // 1. Build upstream config (e.g. Xray with local SOCKS5 inbound on relay_port)
+    // 1. Build upstream config (e.g. Xray/Mihomo with local SOCKS5/mixed inbound on relay_port).
+    // Disable TUN, HTTP secondary inbound, Fake-IP, and colliding Clash API ports on the upstream engine
+    // because the primary engine owns system routing, DNS/Fake-IP, and the dashboard controller.
     let mut upstream_settings = settings.clone();
     upstream_settings.mixed_port = relay_port;
     upstream_settings.allow_lan = false;
+    upstream_settings.tun_mode = false;
+    upstream_settings.socks_port = None;
+    upstream_settings.http_port = None;
+    let preferred_upstream_api = settings.clash_api_port.saturating_add(100).max(19090);
+    upstream_settings.clash_api_port =
+        crate::core::process::find_available_port(preferred_upstream_api, false)
+            .ok()
+            .filter(|&p| {
+                p != relay_port && p != settings.mixed_port && p != settings.clash_api_port
+            })
+            .unwrap_or_else(|| preferred_upstream_api.saturating_add(1));
+    let mut upstream_routing = routing.clone();
+    upstream_routing.mode = RoutingMode::Global;
+    upstream_routing.custom_rules.clear();
+    let mut upstream_dns = dns.clone();
+    upstream_dns.fake_ip = false;
 
     let upstream_cfg = match upstream_core {
         CoreType::Xray => xray::generate_xray_config(
             std::slice::from_ref(upstream_node),
             &upstream_settings,
-            routing,
+            &upstream_routing,
             Some(&upstream_node.id),
         )?,
         CoreType::Mihomo => mihomo::generate_mihomo_config(
             std::slice::from_ref(upstream_node),
             &[],
             &upstream_settings,
-            dns,
-            routing,
+            &upstream_dns,
+            &upstream_routing,
             Some(&upstream_node.id),
         )?,
         CoreType::SingBox => singbox::generate_singbox_config(
             std::slice::from_ref(upstream_node),
             &[],
             &upstream_settings,
-            dns,
-            routing,
+            &upstream_dns,
+            &upstream_routing,
             Some(&upstream_node.id),
         )?,
     };
@@ -136,10 +154,19 @@ pub fn generate_multi_core_relay(
         merged_nodes.push(relay_node.clone());
     }
 
+    let mut merged_groups = groups.to_vec();
+    for grp in &mut merged_groups {
+        for nid in &mut grp.node_ids {
+            if nid == &upstream_node.id {
+                *nid = relay_node.id.clone();
+            }
+        }
+    }
+
     let primary_cfg = generate_core_config(
         primary_core,
         &merged_nodes,
-        groups,
+        &merged_groups,
         settings,
         dns,
         routing,

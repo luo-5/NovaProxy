@@ -110,9 +110,11 @@ async fn test_tun_mode_config_generation_and_binary_check() {
         sort_order: 0,
     };
 
-    let mut settings = AppSettings::default();
-    settings.mixed_port = 27891;
-    settings.tun_mode = true; // Enable TUN mode
+    let settings = AppSettings {
+        mixed_port: 27891,
+        tun_mode: true, // Enable TUN mode
+        ..Default::default()
+    };
 
     let dns = DnsSettings::default();
     let routing = RoutingSettings::default();
@@ -121,7 +123,7 @@ async fn test_tun_mode_config_generation_and_binary_check() {
     if sb_bin.exists() {
         let sb_cfg = generate_core_config(
             CoreType::SingBox,
-            &[dummy_node.clone()],
+            std::slice::from_ref(&dummy_node),
             &[],
             &settings,
             &dns,
@@ -145,7 +147,7 @@ async fn test_tun_mode_config_generation_and_binary_check() {
     if mihomo_bin.exists() {
         let mihomo_cfg = generate_core_config(
             CoreType::Mihomo,
-            &[dummy_node.clone()],
+            std::slice::from_ref(&dummy_node),
             &[],
             &settings,
             &dns,
